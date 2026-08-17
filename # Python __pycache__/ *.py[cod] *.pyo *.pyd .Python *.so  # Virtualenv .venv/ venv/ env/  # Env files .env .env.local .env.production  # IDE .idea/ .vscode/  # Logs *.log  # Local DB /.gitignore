@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Env files
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local DB / temp
+*.sqlite
+*.sqlite3
+*.db
