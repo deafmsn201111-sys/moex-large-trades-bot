@@ -4,6 +4,8 @@ import os
 from collections import deque
 from typing import Dict, Optional
 
+import httpx
+from aiohttp import web
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from dotenv import load_dotenv
@@ -108,6 +110,81 @@ def format_trade_text(trade: Trade) -> str:
     ]
 
     return "\n".join(lines)
+
+
+async def health(request: web.Request) -> web.Response:
+    return web.Response(text="ok")
+
+
+async def start_health_server() -> Optional[web.AppRunner]:
+    """
+    Запускаем HTTP-сервер, если задан PORT.
+    Render Free Web Service требует слушать порт.
+    """
+    port_raw = os.getenv("PORT")
+
+    if not port_raw:
+        logger.info("PORT is not set; health server disabled")
+        return None
+
+    try:
+        port = int(port_raw)
+    except Exception:
+        logger.exception("Invalid PORT value: %s", port_raw)
+        raise
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    logger.info("Health server started on port %s", port)
+    return runner
+
+
+async def self_ping() -> None:
+    """
+    Best-effort self-ping для Render Free Web Service.
+
+    Если сервис засыпает без входящего трафика, периодический запрос
+    к самому себе может помочь держать его активным.
+
+    Это не 100% гарантия, потому что политика бесплатного тарифа может меняться.
+    """
+    interval = _env_int("SELF_PING_INTERVAL_SECONDS", 300, 30, 3600)
+
+    base_url = os.getenv("SELF_PING_URL", "").strip()
+
+    if not base_url:
+        base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+
+    if not base_url:
+        logger.info(
+            "SELF_PING_URL and RENDER_EXTERNAL_URL are not set; self-ping disabled"
+        )
+        return
+
+    if not base_url.startswith("http://") and not base_url.startswith("https://"):
+        base_url = f"https://{base_url}"
+
+    url = base_url.rstrip("/") + "/health"
+
+    logger.info("Self-ping enabled: %s every %s seconds", url, interval)
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            try:
+                response = await client.get(url)
+                logger.debug("Self-ping status: %s", response.status_code)
+            except Exception as exc:
+                logger.warning("Self-ping failed: %s", exc)
+
+            await asyncio.sleep(interval)
 
 
 async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
@@ -220,77 +297,92 @@ async def mark_initial_trades(
 async def main() -> None:
     cfg = load_config()
 
+    # Сначала поднимаем health endpoint, если задан PORT.
+    health_runner = await start_health_server()
+
+    # Запускаем self-ping, если он настроен.
+    self_ping_task = asyncio.create_task(self_ping())
+
     bot = Bot(token=cfg.bot_token)
     moex = MoexClient()
+
+    workers = []
 
     try:
         me = await bot.get_me()
         logger.info("Bot authorized as @%s", me.username)
     except Exception:
         logger.exception("Cannot authorize bot. Check BOT_TOKEN.")
-        await bot.session.close()
+
+        if self_ping_task:
+            self_ping_task.cancel()
+
+        if health_runner:
+            await health_runner.cleanup()
+
         await moex.close()
+        await bot.session.close()
         raise
 
     try:
-        chat = await bot.get_chat(cfg.chat_id)
-        logger.info("Chat accessible: %s", getattr(chat, "id", cfg.chat_id))
-    except Exception:
-        logger.warning(
-            "Cannot validate chat %s. "
-            "Check TELEGRAM_CHAT_ID and that bot is admin in the channel.",
-            cfg.chat_id,
-        )
-
-    if cfg.send_start_message:
         try:
-            await bot.send_message(
-                cfg.chat_id,
-                "✅ Бот мониторинга крупных сделок запущен.",
-            )
+            chat = await bot.get_chat(cfg.chat_id)
+            logger.info("Chat accessible: %s", getattr(chat, "id", cfg.chat_id))
         except Exception:
-            logger.exception(
-                "Cannot send start message. "
-                "Check TELEGRAM_CHAT_ID and bot admin rights."
-            )
-
-    seen: Dict[str, BoundedSet] = {
-        source_key(ticker): BoundedSet(cfg.max_seen_per_ticker)
-        for ticker in cfg.tickers
-    }
-
-    api_semaphore = asyncio.Semaphore(cfg.concurrency)
-
-    alert_queue: asyncio.Queue = asyncio.Queue(
-        maxsize=_env_int("ALERT_QUEUE_SIZE", 5000, 100, 100000)
-    )
-
-    sender_count = _env_int("SEND_WORKERS", 2, 1, 5)
-
-    workers = [
-        asyncio.create_task(
-            alert_sender(
-                f"sender-{i}",
-                bot,
+            logger.warning(
+                "Cannot validate chat %s. "
+                "Check TELEGRAM_CHAT_ID and that bot is admin in the channel.",
                 cfg.chat_id,
-                alert_queue,
             )
+
+        if cfg.send_start_message:
+            try:
+                await bot.send_message(
+                    cfg.chat_id,
+                    "✅ Бот мониторинга крупных сделок запущен.",
+                )
+            except Exception:
+                logger.exception(
+                    "Cannot send start message. "
+                    "Check TELEGRAM_CHAT_ID and bot admin rights."
+                )
+
+        seen: Dict[str, BoundedSet] = {
+            source_key(ticker): BoundedSet(cfg.max_seen_per_ticker)
+            for ticker in cfg.tickers
+        }
+
+        api_semaphore = asyncio.Semaphore(cfg.concurrency)
+
+        alert_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_env_int("ALERT_QUEUE_SIZE", 5000, 100, 100000)
         )
-        for i in range(sender_count)
-    ]
 
-    if not cfg.send_history_on_start:
-        await mark_initial_trades(cfg, moex, seen, api_semaphore)
+        sender_count = _env_int("SEND_WORKERS", 2, 1, 5)
 
-    logger.info(
-        "Starting poll loop: tickers=%s, poll_seconds=%.2f, request_limit=%s, concurrency=%s",
-        len(cfg.tickers),
-        cfg.poll_seconds,
-        cfg.request_limit,
-        cfg.concurrency,
-    )
+        workers = [
+            asyncio.create_task(
+                alert_sender(
+                    f"sender-{i}",
+                    bot,
+                    cfg.chat_id,
+                    alert_queue,
+                )
+            )
+            for i in range(sender_count)
+        ]
 
-    try:
+        if not cfg.send_history_on_start:
+            await mark_initial_trades(cfg, moex, seen, api_semaphore)
+
+        logger.info(
+            "Starting poll loop: tickers=%s, poll_seconds=%.2f, request_limit=%s, concurrency=%s",
+            len(cfg.tickers),
+            cfg.poll_seconds,
+            cfg.request_limit,
+            cfg.concurrency,
+        )
+
         while True:
             loop = asyncio.get_running_loop()
             started = loop.time()
@@ -319,10 +411,20 @@ async def main() -> None:
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt")
     finally:
+        if self_ping_task:
+            self_ping_task.cancel()
+
         for worker in workers:
             worker.cancel()
 
-        await asyncio.gather(*workers, return_exceptions=True)
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+
+        if self_ping_task:
+            await asyncio.gather(self_ping_task, return_exceptions=True)
+
+        if health_runner:
+            await health_runner.cleanup()
 
         await moex.close()
         await bot.session.close()
