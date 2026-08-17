@@ -1,247 +1,240 @@
-import asyncio
+import json
 import logging
 import os
-import time
-from collections import deque
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-import httpx
-from aiohttp import web
-from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
-from dotenv import load_dotenv
+import yaml
 
-from config import AppConfig, TickerConfig, load_config
-from moex_client import MoexClient, Trade
-
-load_dotenv()
-
-# Базовая настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-
-# Убираем шум от сторонних библиотек
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-logging.getLogger("aiogram").setLevel(logging.WARNING)
-
-# Наш логгер
-logger = logging.getLogger("moex-bot")
+logger = logging.getLogger(__name__)
 
 
-def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
-    raw = os.getenv(name)
-
-    try:
-        value = int(raw) if raw is not None else default
-    except Exception:
-        value = default
-
-    return max(min_value, min(value, max_value))
+@dataclass
+class TickerConfig:
+    ticker: str
+    min_value_rub: Optional[float] = None
+    board: str = "TQBR"
+    market: str = "shares"
+    engine: str = "stock"
 
 
-class BoundedSet:
-    """
-    Храним ограниченный набор уже виденных сделок,
-    чтобы не отправлять одно и то же повторно.
-    """
-
-    def __init__(self, max_size: int):
-        self.max_size = max(1, int(max_size))
-        self._items = set()
-        self._order = deque()
-
-    def add(self, value: str) -> bool:
-        if value in self._items:
-            return False
-
-        self._items.add(value)
-        self._order.append(value)
-
-        while len(self._order) > self.max_size:
-            old = self._order.popleft()
-            self._items.discard(old)
-
-        return True
+@dataclass
+class AppConfig:
+    bot_token: str
+    chat_id: str
+    poll_seconds: float
+    request_limit: int
+    concurrency: int
+    default_min_value_rub: float
+    send_history_on_start: bool
+    send_start_message: bool
+    max_seen_per_ticker: int
+    tickers: List[TickerConfig]
 
 
-def source_key(ticker: TickerConfig) -> str:
-    return f"{ticker.engine}:{ticker.market}:{ticker.board}:{ticker.ticker}"
-
-
-def fmt_money(value: Optional[float]) -> str:
+def _to_bool(value: Any, default: bool = False) -> bool:
     if value is None:
-        return "?"
+        return default
 
-    try:
-        return f"{int(round(float(value))):,}".replace(",", " ")
-    except Exception:
-        return str(value)
+    if isinstance(value, bool):
+        return value
+
+    return str(value).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
 
 
-def fmt_price(value: Optional[float]) -> str:
+def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value is None:
-        return "?"
+        return default
 
     try:
-        return f"{float(value):,.2f}".replace(",", " ")
-    except Exception:
-        return str(value)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def fmt_qty(value: Optional[float]) -> str:
+def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     if value is None:
-        return "?"
+        return default
 
     try:
-        value = float(value)
-
-        if abs(value) >= 1:
-            return f"{value:,.0f}".replace(",", " ")
-
-        return f"{value:,.4f}".replace(",", " ")
-    except Exception:
-        return str(value)
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
-def format_trade_text(trade: Trade) -> str:
-    lines = [
-        "🔥 Крупная сделка",
-        f"{trade.secid} / {trade.board}",
-        f"Сумма: {fmt_money(trade.value)} ₽",
-        f"Цена: {fmt_price(trade.price)}",
-        f"Кол-во: {fmt_qty(trade.quantity)}",
-        f"Время: {trade.trade_time or '?'}",
-        f"https://www.moex.com/ru/issue.aspx?board={trade.board}&code={trade.secid}",
-    ]
+def _load_file_config(path: str) -> Dict[str, Any]:
+    if not path or not os.path.isfile(path):
+        return {}
 
-    return "\n".join(lines)
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
 
+    if not isinstance(data, dict):
+        return {}
 
-async def health(request: web.Request) -> web.Response:
-    return web.Response(text="ok")
+    return data
 
 
-async def start_health_server() -> Optional[web.AppRunner]:
-    """
-    Запускаем HTTP-сервер, если задан PORT.
-    Render Free Web Service требует слушать порт.
-    """
-    port_raw = os.getenv("PORT")
-
-    if not port_raw:
-        logger.info("PORT is not set; health server disabled")
-        return None
-
-    try:
-        port = int(port_raw)
-    except Exception:
-        logger.exception("Invalid PORT value: %s", port_raw)
-        raise
-
-    app = web.Application()
-    app.router.add_get("/", health)
-    app.router.add_get("/health", health)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-    logger.info("Health server started on port %s", port)
-    return runner
-
-
-async def self_ping() -> None:
-    """
-    Best-effort self-ping для Render Free Web Service.
-    """
-    interval = _env_int("SELF_PING_INTERVAL_SECONDS", 300, 30, 3600)
-
-    base_url = os.getenv("SELF_PING_URL", "").strip()
-
-    if not base_url:
-        base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-
-    if not base_url:
-        logger.info(
-            "SELF_PING_URL and RENDER_EXTERNAL_URL are not set; self-ping disabled"
-        )
-        return
-
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = f"https://{base_url}"
-
-    url = base_url.rstrip("/") + "/health"
-
-    logger.info("Self-ping enabled: %s every %s seconds", url, interval)
-
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while True:
-            try:
-                response = await client.get(url)
-                logger.debug("Self-ping status: %s", response.status_code)
-            except Exception as exc:
-                logger.warning("Self-ping failed: %s", exc)
-
-            await asyncio.sleep(interval)
-
-
-async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
-    text = format_trade_text(trade)
-
-    for attempt in range(5):
+def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
+    env_json = os.getenv("TICKERS_JSON", "").strip()
+    if env_json:
         try:
-            await bot.send_message(chat_id, text)
-            return
-        except TelegramRetryAfter as exc:
-            logger.warning("Telegram flood limit, retry after %s", exc.retry_after)
-            await asyncio.sleep(exc.retry_after)
-        except TelegramAPIError:
-            logger.exception("Telegram API error while sending trade")
-            return
-        except Exception:
-            logger.exception("Unexpected error while sending trade")
-            return
+            parsed = json.loads(env_json)
+            if isinstance(parsed, list):
+                return parsed
+            else:
+                logger.warning("TICKERS_JSON is not a list, falling back to file/csv")
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse TICKERS_JSON: %s. Falling back to file/csv.", e)
+
+    if file_cfg.get("tickers"):
+        return file_cfg.get("tickers") or []
+
+    env_csv = os.getenv("TICKERS", "").strip()
+    if env_csv:
+        return [
+            {"ticker": item.strip()}
+            for item in env_csv.split(",")
+            if item.strip()
+        ]
+
+    return []
 
 
-async def alert_sender(
-    name: str,
-    bot: Bot,
-    chat_id: str,
-    queue: asyncio.Queue,
-) -> None:
-    while True:
-        trade: Trade = await queue.get()
+def load_config() -> AppConfig:
+    bot_token = os.getenv("BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-        try:
-            await send_trade(bot, chat_id, trade)
-        except Exception:
-            logger.exception("Alert sender worker failed")
-        finally:
-            queue.task_done()
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN is not set")
 
+    if not chat_id:
+        raise RuntimeError("TELEGRAM_CHAT_ID is not set")
 
-async def fetch_trades_safe(
-    moex: MoexClient,
-    ticker: TickerConfig,
-    cfg: AppConfig,
-):
-    try:
-        return await moex.fetch_trades(
-            secid=ticker.ticker,
-            engine=ticker.engine,
-            market=ticker.market,
-            board=ticker.board,
-            limit=cfg.request_limit,
+    config_path = os.getenv("CONFIG_PATH", "config.yaml").strip()
+    file_cfg = _load_file_config(config_path)
+
+    poll_seconds = _to_float(
+        os.getenv("POLL_SECONDS", file_cfg.get("poll_seconds", 1.0)),
+        1.0,
+    )
+
+    request_limit = _to_int(
+        os.getenv("REQUEST_LIMIT", file_cfg.get("request_limit", 100)),
+        100,
+    )
+
+    concurrency = _to_int(
+        os.getenv("CONCURRENCY", file_cfg.get("concurrency", 5)),
+        5,
+    )
+
+    default_min_value_rub = _to_float(
+        os.getenv(
+            "DEFAULT_MIN_VALUE_RUB",
+            file_cfg.get("default_min_value_rub", 1_000_000),
+        ),
+        1_000_000,
+    )
+
+    send_history_on_start = _to_bool(
+        os.getenv(
+            "SEND_HISTORY_ON_START",
+            file_cfg.get("send_history_on_start", False),
+        ),
+        False,
+    )
+
+    send_start_message = _to_bool(
+        os.getenv(
+            "SEND_START_MESSAGE",
+            file_cfg.get("send_start_message", False),
+        ),
+        False,
+    )
+
+    max_seen_per_ticker = _to_int(
+        os.getenv(
+            "MAX_SEEN_PER_TICKER",
+            file_cfg.get("max_seen_per_ticker", 10000),
+        ),
+        10000,
+    )
+
+    poll_seconds = max(0.2, poll_seconds or 1.0)
+    request_limit = min(max(10, request_limit or 100), 500)
+    concurrency = min(max(1, concurrency or 1), 20)
+    default_min_value_rub = max(0.0, default_min_value_rub or 0.0)
+    max_seen_per_ticker = max(100, max_seen_per_ticker or 10000)
+
+    raw_tickers = _raw_tickers(file_cfg)
+
+    if not isinstance(raw_tickers, list):
+        raise RuntimeError("Tickers config must be a list")
+
+    default_board = str(file_cfg.get("board", "TQBR")).strip() or "TQBR"
+    default_market = str(file_cfg.get("market", "shares")).strip() or "shares"
+    default_engine = str(file_cfg.get("engine", "stock")).strip() or "stock"
+
+    tickers: List[TickerConfig] = []
+
+    for item in raw_tickers:
+        if isinstance(item, str):
+            item = {"ticker": item}
+
+        if not isinstance(item, dict):
+            continue
+
+        ticker = str(item.get("ticker", "")).strip().upper()
+        if not ticker:
+            continue
+
+        min_value = _to_float(
+            item.get("min_value_rub", item.get("min_value")),
+            None,
         )
-    except Exception as exc:
-        logger.warning("Failed to fetch trades for %s: %s", ticker.ticker, exc)
-        return []
 
+        if min_value is not None and min_value < 0:
+            min_value = None
 
-async def
+        tickers.append(
+            TickerConfig(
+                ticker=ticker,
+                min_value_rub=min_value,
+                board=str(item.get("board", default_board)).strip() or default_board,
+                market=str(item.get("market", default_market)).strip() or default_market,
+                engine=str(item.get("engine", default_engine)).strip() or default_engine,
+            )
+        )
+
+    unique_tickers: Dict[str, TickerConfig] = {}
+    for ticker in tickers:
+        key = f"{ticker.engine}:{ticker.market}:{ticker.board}:{ticker.ticker}"
+        if key not in unique_tickers:
+            unique_tickers[key] = ticker
+
+    tickers = list(unique_tickers.values())
+
+    if not tickers:
+        raise RuntimeError(
+            "No tickers configured. Set tickers in config.yaml or env TICKERS/TICKERS_JSON."
+        )
+
+    return AppConfig(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        poll_seconds=poll_seconds,
+        request_limit=request_limit,
+        concurrency=concurrency,
+        default_min_value_rub=default_min_value_rub,
+        send_history_on_start=send_history_on_start,
+        send_start_message=send_start_message,
+        max_seen_per_ticker=max_seen_per_ticker,
+        tickers=tickers,
+    )
