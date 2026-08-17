@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -86,7 +87,14 @@ def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
 
     env_json = os.getenv("TICKERS_JSON", "").strip()
     if env_json:
-        return json.loads(env_json)
+        try:
+            parsed = json.loads(env_json)
+            if isinstance(parsed, list):
+                return parsed
+            else:
+                logger.warning("TICKERS_JSON is not a list, falling back to file/csv")
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse TICKERS_JSON: %s. Falling back to file/csv.", e)
 
     if file_cfg.get("tickers"):
         return file_cfg.get("tickers") or []
