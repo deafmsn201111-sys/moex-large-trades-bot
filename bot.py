@@ -17,15 +17,14 @@ from moex_client import MoexClient, Trade
 load_dotenv()
 
 # ============================================================
-# НАСТРОЙКА ЛОГОВ — ВАЖНО!
+# НАСТРОЙКА ЛОГОВ
 # ============================================================
-# Сначала настраиваем базовый формат
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-# Затем глушим шумные библиотеки
+# Глушим шумные библиотеки
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
@@ -33,7 +32,6 @@ logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logging.getLogger("aiogram").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
-# Наш логгер
 logger = logging.getLogger("moex-bot")
 logger.setLevel(logging.INFO)
 # ============================================================
@@ -184,6 +182,13 @@ async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
     for attempt in range(5):
         try:
             await bot.send_message(chat_id, text)
+            logger.info(
+                "✅ Sent to Telegram: %s value=%.0f RUB, price=%s, qty=%s",
+                trade.secid,
+                trade.value,
+                trade.price,
+                trade.quantity,
+            )
             return
         except TelegramRetryAfter as exc:
             logger.warning("Telegram flood limit, retry after %s", exc.retry_after)
@@ -256,6 +261,14 @@ async def process_ticker(
             continue
 
         if trade.value >= threshold:
+            logger.info(
+                "🔥 ALERT: %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
+                trade.secid,
+                trade.value,
+                trade.price,
+                trade.quantity,
+                trade.trade_id,
+            )
             try:
                 alert_queue.put_nowait(trade)
             except asyncio.QueueFull:
