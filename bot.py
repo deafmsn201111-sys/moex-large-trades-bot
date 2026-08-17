@@ -24,7 +24,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-# Глушим шумные библиотеки
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
@@ -39,12 +38,10 @@ logger.setLevel(logging.INFO)
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
     raw = os.getenv(name)
-
     try:
         value = int(raw) if raw is not None else default
     except Exception:
         value = default
-
     return max(min_value, min(value, max_value))
 
 
@@ -57,14 +54,11 @@ class BoundedSet:
     def add(self, value: str) -> bool:
         if value in self._items:
             return False
-
         self._items.add(value)
         self._order.append(value)
-
         while len(self._order) > self.max_size:
             old = self._order.popleft()
             self._items.discard(old)
-
         return True
 
 
@@ -121,11 +115,9 @@ async def health(request: web.Request) -> web.Response:
 
 async def start_health_server() -> Optional[web.AppRunner]:
     port_raw = os.getenv("PORT")
-
     if not port_raw:
         logger.info("PORT is not set; health server disabled")
         return None
-
     try:
         port = int(port_raw)
     except Exception:
@@ -138,31 +130,24 @@ async def start_health_server() -> Optional[web.AppRunner]:
 
     runner = web.AppRunner(app)
     await runner.setup()
-
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-
     logger.info("Health server started on port %s", port)
     return runner
 
 
 async def self_ping() -> None:
     interval = _env_int("SELF_PING_INTERVAL_SECONDS", 300, 30, 3600)
-
     base_url = os.getenv("SELF_PING_URL", "").strip()
-
     if not base_url:
         base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-
     if not base_url:
         logger.info("SELF_PING_URL and RENDER_EXTERNAL_URL are not set; self-ping disabled")
         return
-
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
         base_url = f"https://{base_url}"
 
     url = base_url.rstrip("/") + "/health"
-
     logger.info("Self-ping enabled: %s every %s seconds", url, interval)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -172,13 +157,11 @@ async def self_ping() -> None:
                 logger.debug("Self-ping status: %s", response.status_code)
             except Exception as exc:
                 logger.warning("Self-ping failed: %s", exc)
-
             await asyncio.sleep(interval)
 
 
 async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
     text = format_trade_text(trade)
-
     for attempt in range(5):
         try:
             await bot.send_message(chat_id, text)
@@ -209,7 +192,6 @@ async def alert_sender(
 ) -> None:
     while True:
         trade: Trade = await queue.get()
-
         try:
             await send_trade(bot, chat_id, trade)
         except Exception:
@@ -231,13 +213,13 @@ async def fetch_trades_safe(
             board=ticker.board,
             limit=cfg.request_limit,
         )
-        except Exception as exc:
-        # Выводим тип ошибки (например, ReadError) и её сообщение
+    except Exception as exc:
+        # Теперь будет видно тип ошибки (например, ReadTimeout или ConnectError)
         logger.warning(
-            "Failed to fetch trades for %s: %s - %s", 
-            ticker.ticker, 
-            type(exc).__name__, 
-            exc or "no message"
+            "Failed to fetch trades for %s: %s - %s",
+            ticker.ticker,
+            type(exc).__name__,
+            str(exc) or "no message",
         )
         return []
 
@@ -294,9 +276,7 @@ async def mark_initial_trades(
     async def mark_one(ticker: TickerConfig) -> None:
         async with api_semaphore:
             trades = await fetch_trades_safe(moex, ticker, cfg)
-
         bucket = seen[source_key(ticker)]
-
         for trade in trades:
             bucket.add(trade.dedup_key)
 
@@ -320,13 +300,10 @@ async def main() -> None:
         logger.info("Bot authorized as @%s", me.username)
     except Exception:
         logger.exception("Cannot authorize bot. Check BOT_TOKEN.")
-
         if self_ping_task:
             self_ping_task.cancel()
-
         if health_runner:
             await health_runner.cleanup()
-
         await moex.close()
         await bot.session.close()
         raise
@@ -366,11 +343,9 @@ async def main() -> None:
         }
 
         api_semaphore = asyncio.Semaphore(cfg.concurrency)
-
         alert_queue: asyncio.Queue = asyncio.Queue(
             maxsize=_env_int("ALERT_QUEUE_SIZE", 5000, 100, 100000)
         )
-
         sender_count = _env_int("SEND_WORKERS", 2, 1, 5)
 
         workers = [
