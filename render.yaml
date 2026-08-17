@@ -1,0 +1,44 @@
+services:
+  - type: worker
+    name: moex-large-trades-bot
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+      # Если хочешь управлять тикерами через Render, задай TICKERS_JSON.
+      # Если не задать, будет использоваться config.yaml из репозитория.
+      - key: TICKERS_JSON
+        sync: false
+
+      - key: POLL_SECONDS
+        value: "1.0"
+
+      - key: REQUEST_LIMIT
+        value: "100"
+
+      - key: CONCURRENCY
+        value: "5"
+
+      - key: DEFAULT_MIN_VALUE_RUB
+        value: "5000000"
+
+      - key: SEND_HISTORY_ON_START
+        value: "false"
+
+      - key: SEND_START_MESSAGE
+        value: "false"
+
+      - key: ALERT_QUEUE_SIZE
+        value: "5000"
+
+      - key: SEND_WORKERS
+        value: "2"
+
+      - key: CONFIG_PATH
+        value: "config.yaml"
