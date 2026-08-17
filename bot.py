@@ -231,8 +231,14 @@ async def fetch_trades_safe(
             board=ticker.board,
             limit=cfg.request_limit,
         )
-    except Exception as exc:
-        logger.warning("Failed to fetch trades for %s: %s", ticker.ticker, exc)
+        except Exception as exc:
+        # Выводим тип ошибки (например, ReadError) и её сообщение
+        logger.warning(
+            "Failed to fetch trades for %s: %s - %s", 
+            ticker.ticker, 
+            type(exc).__name__, 
+            exc or "no message"
+        )
         return []
 
 
