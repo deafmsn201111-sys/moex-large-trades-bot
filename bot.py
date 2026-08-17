@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from collections import deque
 from typing import Dict, Optional
 
@@ -15,12 +16,27 @@ from moex_client import MoexClient, Trade
 
 load_dotenv()
 
+# ============================================================
+# НАСТРОЙКА ЛОГОВ — ВАЖНО!
+# ============================================================
+# Сначала настраиваем базовый формат
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
+# Затем глушим шумные библиотеки
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+logging.getLogger("aiogram").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+# Наш логгер
 logger = logging.getLogger("moex-bot")
+logger.setLevel(logging.INFO)
+# ============================================================
 
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -35,11 +51,6 @@ def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
 
 
 class BoundedSet:
-    """
-    Храним ограниченный набор уже виденных сделок,
-    чтобы не отправлять одно и то же повторно.
-    """
-
     def __init__(self, max_size: int):
         self.max_size = max(1, int(max_size))
         self._items = set()
@@ -66,7 +77,6 @@ def source_key(ticker: TickerConfig) -> str:
 def fmt_money(value: Optional[float]) -> str:
     if value is None:
         return "?"
-
     try:
         return f"{int(round(float(value))):,}".replace(",", " ")
     except Exception:
@@ -76,7 +86,6 @@ def fmt_money(value: Optional[float]) -> str:
 def fmt_price(value: Optional[float]) -> str:
     if value is None:
         return "?"
-
     try:
         return f"{float(value):,.2f}".replace(",", " ")
     except Exception:
@@ -86,13 +95,10 @@ def fmt_price(value: Optional[float]) -> str:
 def fmt_qty(value: Optional[float]) -> str:
     if value is None:
         return "?"
-
     try:
         value = float(value)
-
         if abs(value) >= 1:
             return f"{value:,.0f}".replace(",", " ")
-
         return f"{value:,.4f}".replace(",", " ")
     except Exception:
         return str(value)
@@ -108,7 +114,6 @@ def format_trade_text(trade: Trade) -> str:
         f"Время: {trade.trade_time or '?'}",
         f"https://www.moex.com/ru/issue.aspx?board={trade.board}&code={trade.secid}",
     ]
-
     return "\n".join(lines)
 
 
@@ -117,10 +122,6 @@ async def health(request: web.Request) -> web.Response:
 
 
 async def start_health_server() -> Optional[web.AppRunner]:
-    """
-    Запускаем HTTP-сервер, если задан PORT.
-    Render Free Web Service требует слушать порт.
-    """
     port_raw = os.getenv("PORT")
 
     if not port_raw:
@@ -148,14 +149,6 @@ async def start_health_server() -> Optional[web.AppRunner]:
 
 
 async def self_ping() -> None:
-    """
-    Best-effort self-ping для Render Free Web Service.
-
-    Если сервис засыпает без входящего трафика, периодический запрос
-    к самому себе может помочь держать его активным.
-
-    Это не 100% гарантия, потому что политика бесплатного тарифа может меняться.
-    """
     interval = _env_int("SELF_PING_INTERVAL_SECONDS", 300, 30, 3600)
 
     base_url = os.getenv("SELF_PING_URL", "").strip()
@@ -164,9 +157,7 @@ async def self_ping() -> None:
         base_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 
     if not base_url:
-        logger.info(
-            "SELF_PING_URL and RENDER_EXTERNAL_URL are not set; self-ping disabled"
-        )
+        logger.info("SELF_PING_URL and RENDER_EXTERNAL_URL are not set; self-ping disabled")
         return
 
     if not base_url.startswith("http://") and not base_url.startswith("https://"):
@@ -197,8 +188,8 @@ async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
         except TelegramRetryAfter as exc:
             logger.warning("Telegram flood limit, retry after %s", exc.retry_after)
             await asyncio.sleep(exc.retry_after)
-        except TelegramAPIError:
-            logger.exception("Telegram API error while sending trade")
+        except TelegramAPIError as exc:
+            logger.error("Telegram API error while sending trade: %s", exc)
             return
         except Exception:
             logger.exception("Unexpected error while sending trade")
@@ -297,10 +288,7 @@ async def mark_initial_trades(
 async def main() -> None:
     cfg = load_config()
 
-    # Сначала поднимаем health endpoint, если задан PORT.
     health_runner = await start_health_server()
-
-    # Запускаем self-ping, если он настроен.
     self_ping_task = asyncio.create_task(self_ping())
 
     bot = Bot(token=cfg.bot_token)
@@ -327,12 +315,18 @@ async def main() -> None:
     try:
         try:
             chat = await bot.get_chat(cfg.chat_id)
-            logger.info("Chat accessible: %s", getattr(chat, "id", cfg.chat_id))
-        except Exception:
-            logger.warning(
-                "Cannot validate chat %s. "
-                "Check TELEGRAM_CHAT_ID and that bot is admin in the channel.",
+            logger.info(
+                "Chat accessible: id=%s title=%s",
+                getattr(chat, "id", cfg.chat_id),
+                getattr(chat, "title", "?"),
+            )
+        except Exception as exc:
+            logger.error(
+                "Cannot validate chat %s: %s. "
+                "Check TELEGRAM_CHAT_ID (должен начинаться с -100 для каналов!) "
+                "и что бот добавлен админом в канал с правом постить.",
                 cfg.chat_id,
+                exc,
             )
 
         if cfg.send_start_message:
@@ -375,12 +369,14 @@ async def main() -> None:
         if not cfg.send_history_on_start:
             await mark_initial_trades(cfg, moex, seen, api_semaphore)
 
+        last_heartbeat = time.time()
+        HEARTBEAT_INTERVAL = 60
+
         logger.info(
-            "Starting poll loop: tickers=%s, poll_seconds=%.2f, request_limit=%s, concurrency=%s",
+            "Starting poll loop: tickers=%s, poll_seconds=%.2f, request_limit=%s",
             len(cfg.tickers),
             cfg.poll_seconds,
             cfg.request_limit,
-            cfg.concurrency,
         )
 
         while True:
@@ -403,6 +399,15 @@ async def main() -> None:
 
             elapsed = loop.time() - started
             sleep_time = max(0.05, cfg.poll_seconds - elapsed)
+
+            now = time.time()
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                logger.info(
+                    "Heartbeat: queue_size=%d, seen_trades=%d",
+                    alert_queue.qsize(),
+                    sum(len(s._items) for s in seen.values()),
+                )
+                last_heartbeat = now
 
             await asyncio.sleep(sleep_time)
 
