@@ -1,0 +1,60 @@
+# Частота опроса MOEX ISS в секундах.
+# 1.0 - хороший баланс между скоростью и нагрузкой.
+# Можно попробовать 0.7 / 0.5, но следи за лимитами MOEX.
+poll_seconds: 1.0
+
+# Сколько последних сделок тянуть за один запрос по каждому тикеру.
+# Если сделок очень много и бот не успевает, увеличивай request_limit или уменьшай poll_seconds.
+request_limit: 100
+
+# Сколько одновременных запросов к MOEX можно делать.
+# Для небольшого списка тикеров 5 нормально.
+# Для большого списка можно поднять, но можно упереться в rate limit MOEX.
+concurrency: 5
+
+# Порог по умолчанию в рублях, если у тикера не указан min_value_rub.
+default_min_value_rub: 5000000
+
+# При старте не отправлять исторические сделки из последней пачки.
+# Рекомендуется false, чтобы после перезапуска не было спама.
+send_history_on_start: false
+
+# Отправить ли сообщение о запуске.
+send_start_message: false
+
+# Сколько уникальных сделок держать в памяти по каждому тикеру.
+max_seen_per_ticker: 10000
+
+# Рынок/борд по умолчанию.
+# Для акций Мосбиржи основной рынок обычно TQBR.
+engine: stock
+market: shares
+board: TQBR
+
+# Список тикеров.
+# Для каждого можно задать свой порог min_value_rub.
+tickers:
+  - ticker: SBER
+    min_value_rub: 10000000
+
+  - ticker: GAZP
+    min_value_rub: 10000000
+
+  - ticker: LKOH
+    min_value_rub: 5000000
+
+  - ticker: YDEX
+    min_value_rub: 5000000
+
+  - ticker: ROSN
+    min_value_rub: 5000000
+
+  - ticker: MGNT
+    min_value_rub: 5000000
+
+  # Пример, если захочешь другой рынок/борд:
+  # - ticker: SIH5
+  #   engine: futures
+  #   market: futures
+  #   board: RFUD
+  #   min_value_rub: 10000000
