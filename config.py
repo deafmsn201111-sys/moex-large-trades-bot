@@ -1,10 +1,13 @@
 import json
-import os
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import yaml
+
+# Инициализируем логгер для этого модуля
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -80,11 +83,13 @@ def _load_file_config(path: str) -> Dict[str, Any]:
 
 
 def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
-    # Приоритет:
-    # 1. TICKERS_JSON
-    # 2. config.yaml -> tickers
-    # 3. TICKERS=SBER,GAZP,LKOH
-
+    """
+    Получаем список тикеров.
+    Приоритет:
+    1. TICKERS_JSON (если задан и валиден)
+    2. config.yaml -> tickers
+    3. TICKERS=SBER,GAZP,LKOH (через запятую)
+    """
     env_json = os.getenv("TICKERS_JSON", "").strip()
     if env_json:
         try:
@@ -94,6 +99,7 @@ def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
             else:
                 logger.warning("TICKERS_JSON is not a list, falling back to file/csv")
         except json.JSONDecodeError as e:
+            # Если JSON битый или пустой, просто логируем и идем дальше к config.yaml
             logger.warning("Failed to parse TICKERS_JSON: %s. Falling back to file/csv.", e)
 
     if file_cfg.get("tickers"):
