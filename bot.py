@@ -406,12 +406,16 @@ async def main() -> None:
         # ============================================================
         seen = BoundedSet(cfg.max_seen_per_ticker)
 
-        # Предзаполняем seen последними сделками, чтобы не спамить историей
+                # ============================================================
+        # Шаг 3: Предзаполнение дедупликации (последние сделки)
+        # ============================================================
         logger.info("Pre-filling seen trades from history...")
         for ticker_cfg in resolved_tickers:
-            last_trades = await tinkoff.get_last_trades(
-                figi=ticker_cfg.figi,
-                limit=100,
+            # Синхронный метод вызываем в отдельном потоке
+            last_trades = await asyncio.to_thread(
+                tinkoff.get_last_trades_sync,
+                ticker_cfg.figi,
+                100,
             )
             for trade in last_trades:
                 seen.add(trade.dedup_key)
