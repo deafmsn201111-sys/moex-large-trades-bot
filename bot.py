@@ -364,7 +364,7 @@ async def main() -> None:
                 resolved = ticker_cfg
             else:
                 # Резолвим через API
-                figi = await tinkoff.resolve_figi(ticker_cfg.ticker)
+                figi = await asyncio.to_thread(tinkoff.resolve_figi_sync, ticker_cfg.ticker)
                 if figi:
                     resolved = TickerConfig(
                         ticker=ticker_cfg.ticker,
