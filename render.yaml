@@ -8,48 +8,29 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
-
       - key: TELEGRAM_CHAT_ID
         sync: false
-
-      # Если хочешь управлять тикерами через Render, задай TICKERS_JSON.
-      # Если не задать, будет использоваться config.yaml из репозитория.
       - key: TICKERS_JSON
         sync: false
-
       - key: POLL_SECONDS
         value: "1.0"
-
       - key: REQUEST_LIMIT
-        value: "100"
-
+        value: "5000"
       - key: CONCURRENCY
         value: "5"
-
       - key: DEFAULT_MIN_VALUE_RUB
-        value: "5000000"
-
+        value: "2000000"
       - key: SEND_HISTORY_ON_START
         value: "false"
-
       - key: SEND_START_MESSAGE
         value: "false"
-
       - key: ALERT_QUEUE_SIZE
         value: "5000"
-
       - key: SEND_WORKERS
         value: "2"
-
       - key: CONFIG_PATH
         value: "config.yaml"
-
-      # Self-ping, чтобы бесплатный web-сервис реже засыпал.
-      # Если RENDER_EXTERNAL_URL автоматически не подхватится,
-      # задай вручную вида:
-      # https://your-service-name.onrender.com
       - key: SELF_PING_URL
         sync: false
-
       - key: SELF_PING_INTERVAL_SECONDS
         value: "300"
