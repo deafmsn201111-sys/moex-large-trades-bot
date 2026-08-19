@@ -5,7 +5,6 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Устанавливаем системные зависимости для grpc (если нужны)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
@@ -13,9 +12,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
-# --no-cache-dir и --no-build-isolation для установки с GitHub
+# Устанавливаем основные зависимости
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
+
+# Устанавливаем tinkoff-invest БЕЗ зависимостей (игнорируем битую зависимость tinkoff)
+RUN pip install --no-cache-dir --no-deps \
+    git+https://github.com/RussianInvestments/invest-python.git
 
 COPY . .
 
