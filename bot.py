@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from dotenv import load_dotenv
 
 from config import AppConfig, TickerConfig, load_config
-from tinkoff_client import TinkoffClient, Trade
+from tinkoff_client import TinkoffClient, TradeData
 
 load_dotenv()
 
@@ -91,7 +91,7 @@ def fmt_qty(value: Optional[float]) -> str:
         return str(value)
 
 
-def format_trade_text(trade: Trade) -> str:
+def format_trade_text(trade: TradeData) -> str:
     direction_emoji = trade.direction_emoji
     direction_text = trade.direction_text
 
@@ -168,7 +168,7 @@ async def self_ping() -> None:
             await asyncio.sleep(interval)
 
 
-async def send_alerts_batch(bot: Bot, chat_id: str, trades: List[Trade]) -> None:
+async def send_alerts_batch(bot: Bot, chat_id: str, trades: List[TradeData]) -> None:
     """Отправляет группу трейдов одним сообщением."""
     MAX_TRADES_PER_MSG = 10
 
@@ -224,11 +224,11 @@ async def alert_sender(
 ) -> None:
     """Собирает трейды в батчи и отправляет группами."""
     while True:
-        batch: List[Trade] = []
+        batch: List[TradeData] = []
 
         try:
             while True:
-                trade: Trade = queue.get_nowait()
+                trade: TradeData = queue.get_nowait()
                 batch.append(trade)
                 queue.task_done()
                 if len(batch) >= 50:
@@ -238,7 +238,7 @@ async def alert_sender(
 
         if not batch:
             try:
-                trade: Trade = await queue.get()
+                trade: TradeData = await queue.get()
                 batch.append(trade)
                 queue.task_done()
             except Exception:
@@ -248,7 +248,7 @@ async def alert_sender(
 
         try:
             while True:
-                trade: Trade = queue.get_nowait()
+                trade: TradeData = queue.get_nowait()
                 batch.append(trade)
                 queue.task_done()
                 if len(batch) >= 50:
@@ -260,7 +260,7 @@ async def alert_sender(
 
 
 async def process_trade(
-    trade: Trade,
+    trade: TradeData,
     cfg: AppConfig,
     tickers_by_figi: Dict[str, TickerConfig],
     seen: BoundedSet,
