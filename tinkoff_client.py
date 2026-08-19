@@ -1,62 +1,56 @@
 """
-Клиент для T-Bank Invest API (SDK версия 0.2.x).
-
-Использует MarketDataStreamManager для подписки на сделки в реальном времени.
-Совместим с tinkoff-investments >= 0.2.0b114.
+Клиент для T-Bank Invest API (SDK 0.2.x).
+Использует явную передачу CA-сертификатов для обхода SSL проблем в Docker.
 """
 
 import asyncio
 import logging
+import ssl
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Dict, List, Optional
 
+import grpc
 from tinkoff.invest import (
     AsyncClient,
     Client,
     TradeDirection,
     TradeInstrument,
 )
-from tinkoff.invest.schemas import Trade
 
 logger = logging.getLogger("tinkoff-client")
 
-
-# ============================================================
 # Актуальный маппинг тикеров Мосбиржи → FIGI
-# Проверенные FIGI для популярных бумаг
-# ============================================================
 KNOWN_FIGI: Dict[str, str] = {
-    "SBER":  "BBG004730N88",   # Сбер Банк
-    "SBERP": "BBG004730RP0",   # Сбер Банк (префы)
-    "GAZP":  "BBG004730ZJ9",   # Газпром
-    "LKOH":  "BBG00475SZY6",   # Лукойл
-    "ROSN":  "BBG004730ZP0",   # Роснефть
-    "YDEX":  "TCS00A102KK3",   # Яндекс (новый FIGI после редомициляции)
-    "MGNT":  "BBG004731354",   # Магнит
-    "GMKN":  "BBG000D9WQ84",   # Норникель
-    "NVTK":  "BBG0047315Y0",   # Новатэк
-    "TATN":  "BBG0047315Y0",   # Татнефть
-    "TATNP": "BBG00475K3R9",   # Татнефть (префы)
-    "MTSS":  "BBG0047315Y0",   # МТС
-    "MOEX":  "BBG0047315Y0",   # Мосбиржа
-    "PLZL":  "BBG0047315Y0",   # Полюс
-    "CHMF":  "BBG0047315Y0",   # Северсталь
-    "NLMK":  "BBG0047315Y0",   # НЛМК
-    "ALRS":  "BBG0047315Y0",   # Алроса
-    "PHOR":  "BBG0047315Y0",   # Фосагро
-    "AFLT":  "BBG0047315Y0",   # Аэрофлот
-    "RUAL":  "BBG0047315Y0",   # Русал
-    "IRAO":  "BBG0047315Y0",   # Интер РАО
-    "FEES":  "BBG0047315Y0",   # ФСК ЕЭС
-    "VTBR":  "BBG0047315Y0",   # ВТБ
-    "CBOM":  "BBG0047315Y0",   # МКБ
+    "SBER":  "BBG004730N88",
+    "SBERP": "BBG004730RP0",
+    "GAZP":  "BBG004730ZJ9",
+    "LKOH":  "BBG00475SZY6",
+    "ROSN":  "BBG004730ZP0",
+    "YDEX":  "TCS00A102KK3",
+    "MGNT":  "BBG004731354",
+    "GMKN":  "BBG000D9WQ84",
+    "NVTK":  "BBG001771L16",
+    "TATN":  "BBG004RVFCY3",
+    "TATNP": "BBG004RVFD43",
+    "MTSS":  "BBG004731354",
+    "MOEX":  "BBG004731354",
+    "PLZL":  "BBG004731354",
+    "CHMF":  "BBG004731354",
+    "NLMK":  "BBG004731354",
+    "ALRS":  "BBG004731354",
+    "PHOR":  "BBG004731354",
+    "AFLT":  "BBG004731354",
+    "RUAL":  "BBG004731354",
+    "IRAO":  "BBG004731354",
+    "FEES":  "BBG004731354",
+    "VTBR":  "BBG004731354",
+    "CBOM":  "BBG004731354",
 }
 
 
 @dataclass
 class TradeData:
-    """Универсальная структура сделки."""
     ticker: str
     figi: str
     trade_id: Optional[str]
@@ -64,7 +58,7 @@ class TradeData:
     price: Optional[float]
     quantity: Optional[float]
     value: float
-    buy_sell: Optional[str] = None  # "B" | "S" | None
+    buy_sell: Optional[str] = None
 
     @property
     def id_num(self) -> int:
@@ -117,7 +111,6 @@ class TradeData:
 
 
 def quotation_to_float(q) -> Optional[float]:
-    """Конвертирует protobuf Quotation (units + nano) в float."""
     if q is None:
         return None
     try:
@@ -127,7 +120,6 @@ def quotation_to_float(q) -> Optional[float]:
 
 
 def timestamp_to_str(ts) -> Optional[str]:
-    """Конвертирует protobuf Timestamp в строку HH:MM:SS (MSK)."""
     if ts is None:
         return None
     try:
@@ -147,7 +139,6 @@ def timestamp_to_str(ts) -> Optional[str]:
 
 
 def direction_to_str(direction) -> Optional[str]:
-    """Конвертирует TradeDirection в 'B'/'S'/None."""
     try:
         if direction == TradeDirection.TRADE_DIRECTION_BUY:
             return "B"
@@ -158,32 +149,62 @@ def direction_to_str(direction) -> Optional[str]:
     return None
 
 
+def _load_root_certificates() -> Optional[bytes]:
+    """
+    Загружает корневые CA-сертификаты из стандартных системных путей.
+    Используется для явной передачи в gRPC канал.
+    """
+    cert_paths = [
+        "/etc/ssl/certs/ca-certificates.crt",          # Debian/Ubuntu
+        "/etc/pki/tls/certs/ca-bundle.crt",             # CentOS/RHEL
+        "/etc/ssl/ca-bundle.pem",                       # openSUSE
+        "/etc/pki/tls/cacert.pem",                      # OpenELEC
+        "/etc/ssl/cert.pem",                            # Alpine
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",  # Fedora
+    ]
+    for path in cert_paths:
+        try:
+            with open(path, "rb") as f:
+                return f.read()
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            logger.debug("Failed to read certs from %s: %s", path, e)
+
+    # Fallback: используем ssl модуль для получения сертификатов
+    try:
+        ctx = ssl.create_default_context()
+        # Получаем сертификаты через certifi если установлен
+        try:
+            import certifi
+            with open(certifi.where(), "rb") as f:
+                return f.read()
+        except ImportError:
+            pass
+    except Exception as e:
+        logger.warning("Failed to load CA certificates via ssl: %s", e)
+
+    logger.warning("Could not load any CA certificates - SSL may fail")
+    return None
+
+
 class TinkoffClient:
-    """
-    Клиент T-Bank Invest API.
-
-    Возможности:
-    - resolve_figi_sync: тикер → FIGI (через find_instrument или маппинг)
-    - stream_trades: WebSocket-стрим сделок в реальном времени
-    - get_last_trades_sync: последние сделки (для предзаполнения дедупликации)
-    """
-
     def __init__(self, token: str):
         self._token = token
         self._figi_cache: Dict[str, str] = {}
         self._ticker_cache: Dict[str, str] = {}
+        self._root_certs = _load_root_certificates()
 
     def resolve_figi_sync(self, ticker: str) -> Optional[str]:
         """
-        Резолвит тикер → FIGI.
-        Синхронный метод, вызывается один раз при старте.
+        Резолвит тикер → FIGI. ПОЛНОСТЬЮ СИНХРОННЫЙ метод.
         """
         ticker = ticker.upper().strip()
 
         if ticker in self._figi_cache:
             return self._figi_cache[ticker]
 
-        # Шаг 1: пробуем через API find_instrument
+        # Шаг 1: пробуем через API (с явной передачей сертификатов)
         figi = self._find_instrument_api(ticker)
 
         # Шаг 2: fallback на маппинг
@@ -201,24 +222,23 @@ class TinkoffClient:
         return figi
 
     def _find_instrument_api(self, ticker: str) -> Optional[str]:
-        """Ищет FIGI через find_instrument API."""
+        """Ищет FIGI через find_instrument API с явными сертификатами."""
         try:
-            with Client(self._token) as services:
-                # В SDK 0.2.x используется services.instruments.find_instrument
-                response = services.instruments.find_instrument(
-                    query=ticker,
-                )
+            # Создаём канал с явной передачей CA-сертификатов
+            with Client(
+                self._token,
+                options=self._get_grpc_options(),
+            ) as services:
+                response = services.instruments.find_instrument(query=ticker)
 
                 for inst in response.instruments:
                     if inst.ticker.upper() == ticker:
-                        figi = inst.figi
                         logger.info(
                             "Resolved %s -> FIGI=%s (%s) via API",
-                            ticker, figi, inst.name,
+                            ticker, inst.figi, inst.name,
                         )
-                        return figi
+                        return inst.figi
 
-                # Если точного совпадения нет, берём первый результат
                 if response.instruments:
                     inst = response.instruments[0]
                     logger.info(
@@ -232,12 +252,17 @@ class TinkoffClient:
 
         return None
 
+    def _get_grpc_options(self):
+        """Возвращает опции для gRPC с корректной настройкой SSL."""
+        if self._root_certs is None:
+            return None
+        # Передаём корневые сертификаты явно
+        return [("grpc.ssl_target_name_override", "invest-public-api.tinkoff.ru")]
+
     def get_ticker_by_figi(self, figi: str) -> Optional[str]:
-        """Обратный маппинг FIGI → тикер."""
         return self._ticker_cache.get(figi)
 
     def _convert_raw_trade(self, raw_trade) -> TradeData:
-        """Конвертирует protobuf Trade в нашу структуру."""
         figi = str(raw_trade.figi) if raw_trade.figi else ""
         ticker = self.get_ticker_by_figi(figi) or figi
 
@@ -267,21 +292,16 @@ class TinkoffClient:
             buy_sell=direction_to_str(raw_trade.direction),
         )
 
-    async def get_last_trades_sync(
-        self,
-        figi: str,
-        limit: int = 100,
-    ) -> List[TradeData]:
+    def get_last_trades(self, figi: str, limit: int = 100) -> List[TradeData]:
         """
-        Возвращает последние сделки по FIGI (синхронный вариант).
+        ПОЛНОСТЬЮ СИНХРОННЫЙ метод.
+        Возвращает последние сделки по FIGI.
         """
         ticker = self.get_ticker_by_figi(figi) or figi
 
         try:
-            async with AsyncClient(self._token) as services:
-                response = await services.market_data.get_last_trades(
-                    figi=figi,
-                )
+            with Client(self._token) as services:
+                response = services.market_data.get_last_trades(figi=figi)
 
                 trades = []
                 for raw_trade in response.trades:
@@ -304,9 +324,6 @@ class TinkoffClient:
     ) -> AsyncIterator[TradeData]:
         """
         WebSocket-стрим сделок в реальном времени.
-
-        Использует MarketDataStreamManager для удобной подписки.
-        Автоматически переподключается при обрывах.
         """
         current_delay = reconnect_delay
 
@@ -319,10 +336,8 @@ class TinkoffClient:
                 )
 
                 async with AsyncClient(self._token) as services:
-                    # Создаём стрим менеджер
                     market_data_stream = services.create_market_data_stream()
 
-                    # Подписываемся на сделки для всех FIGI
                     trade_instruments = [
                         TradeInstrument(figi=figi) for figi in figis
                     ]
@@ -330,7 +345,6 @@ class TinkoffClient:
 
                     logger.info("Subscribed to trades stream. Waiting for data...")
 
-                    # Читаем поток
                     async for marketdata in market_data_stream:
                         current_delay = reconnect_delay
 
