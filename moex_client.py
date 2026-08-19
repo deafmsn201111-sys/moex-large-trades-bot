@@ -15,6 +15,7 @@ PRICE_KEYS = ["PRICE", "price"]
 QTY_KEYS = ["QUANTITY", "quantity", "qty", "lots"]
 VALUE_KEYS = ["VALUE", "value", "trade_value", "tradevalue"]
 LOTSIZE_KEYS = ["LOTSIZE", "lotsize", "lot", "lot_size"]
+BUYSELL_KEYS = ["BUYSELL", "buysell", "buy_sell", "side", "SIDE"]
 
 
 @dataclass
@@ -28,6 +29,7 @@ class Trade:
     price: Optional[float]
     quantity: Optional[float]
     value: float
+    buy_sell: Optional[str] = None  # "B" = Buy, "S" = Sell
     source_index: int = 0
 
     @property
@@ -44,6 +46,29 @@ class Trade:
         return (self.trade_time or "", self.id_num, self.source_index)
 
     @property
+    def is_buy(self) -> Optional[bool]:
+        """True если покупка (BUY), False если продажа (SELL), None если неизвестно."""
+        if self.buy_sell is None:
+            return None
+        return str(self.buy_sell).upper().startswith("B")
+
+    @property
+    def direction_emoji(self) -> str:
+        if self.buy_sell is None:
+            return "⚪"
+        if str(self.buy_sell).upper().startswith("B"):
+            return "🟢"  # Покупка
+        return "🔴"  # Продажа
+
+    @property
+    def direction_text(self) -> str:
+        if self.buy_sell is None:
+            return "?"
+        if str(self.buy_sell).upper().startswith("B"):
+            return "ПОКУПКА"
+        return "ПРОДАЖА"
+
+    @property
     def dedup_key(self) -> str:
         if self.trade_id:
             return f"id:{self.engine}:{self.market}:{self.board}:{self.secid}:{self.trade_id}"
@@ -53,6 +78,7 @@ class Trade:
             str(self.price if self.price is not None else ""),
             str(self.quantity if self.quantity is not None else ""),
             str(self.value),
+            str(self.buy_sell or ""),
         ])
         return "hash:" + hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -160,6 +186,9 @@ class MoexClient:
                 raw_value = _to_float(_pick(item, VALUE_KEYS))
                 lotsize = _to_float(_pick(item, LOTSIZE_KEYS)) or 1.0
 
+                raw_buysell = _pick(item, BUYSELL_KEYS)
+                buy_sell = None if raw_buysell is None else str(raw_buysell).strip() or None
+
                 if raw_value is not None and raw_value > 0:
                     value = abs(raw_value)
                 elif price is not None and quantity is not None:
@@ -178,6 +207,7 @@ class MoexClient:
                         price=price,
                         quantity=quantity,
                         value=value,
+                        buy_sell=buy_sell,
                         source_index=idx,
                     )
                 )
