@@ -1,15 +1,13 @@
-poll_seconds: 1.0
-request_limit: 5000
-concurrency: 5
+# Порог по умолчанию в рублях
 default_min_value_rub: 2000000
-send_history_on_start: false
+
+# Отправить сообщение о запуске
 send_start_message: false
+
+# Размер истории для дедупликации на тикер
 max_seen_per_ticker: 50000
 
-engine: stock
-market: shares
-board: TQBR
-
+# Тикеры Мосбиржи (будут автоматически зарезолвлены в FIGI)
 tickers:
   - ticker: SBER
     min_value_rub: 2000000
