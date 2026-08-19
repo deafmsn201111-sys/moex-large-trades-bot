@@ -93,14 +93,29 @@ def fmt_qty(value: Optional[float]) -> str:
 
 
 def format_trade_text(trade: Trade) -> str:
+    # Направление сделки с эмодзи
+    direction_emoji = trade.direction_emoji
+    direction_text = trade.direction_text
+
+    # Заголовок с направлением
+    if direction_text == "ПОКУПКА":
+        header = f"{direction_emoji}📈 ПОКУПКА (BUY)"
+    elif direction_text == "ПРОДАЖА":
+        header = f"{direction_emoji}📉 ПРОДАЖА (SELL)"
+    else:
+        header = f"{direction_emoji} Сделка"
+
     lines = [
-        "🔥 Крупная сделка",
-        f"{trade.secid} / {trade.board}",
-        f"Сумма: {fmt_money(trade.value)} ₽",
-        f"Цена: {fmt_price(trade.price)}",
-        f"Кол-во: {fmt_qty(trade.quantity)}",
-        f"Время: {trade.trade_time or '?'}",
-        f"https://www.moex.com/ru/issue.aspx?board={trade.board}&code={trade.secid}",
+        header,
+        f"<b>{trade.secid}</b> / {trade.board}",
+        "",
+        f"💰 Сумма: <b>{fmt_money(trade.value)} ₽</b>",
+        f"💵 Цена: {fmt_price(trade.price)}",
+        f"📦 Кол-во: {fmt_qty(trade.quantity)}",
+        f"🕐 Время: {trade.trade_time or '?'}",
+        f"🆔 № сделки: {trade.trade_id or '?'}",
+        "",
+        f'<a href="https://www.moex.com/ru/issue.aspx?board={trade.board}&code={trade.secid}">Открыть на MOEX</a>',
     ]
     return "\n".join(lines)
 
@@ -160,9 +175,15 @@ async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
     text = format_trade_text(trade)
     for attempt in range(5):
         try:
-            await bot.send_message(chat_id, text)
+            await bot.send_message(
+                chat_id,
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
             logger.info(
-                "Sent to Telegram: %s value=%.0f RUB, price=%s, qty=%s",
+                "Sent to Telegram: %s %s value=%.0f RUB, price=%s, qty=%s",
+                trade.direction_text,
                 trade.secid,
                 trade.value,
                 trade.price,
@@ -244,7 +265,8 @@ async def process_ticker(
 
         if trade.value >= threshold:
             logger.info(
-                "ALERT: %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
+                "ALERT: %s %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
+                trade.direction_text,
                 trade.secid,
                 trade.value,
                 trade.price,
@@ -369,7 +391,6 @@ async def main() -> None:
             for i in range(sender_count)
         ]
 
-        # Инициализируем адаптивную пагинацию
         await initialize_pagination(cfg, moex, api_semaphore)
 
         last_heartbeat = time.time()
