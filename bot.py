@@ -93,11 +93,9 @@ def fmt_qty(value: Optional[float]) -> str:
 
 
 def format_trade_text(trade: Trade) -> str:
-    # Направление сделки с эмодзи
     direction_emoji = trade.direction_emoji
     direction_text = trade.direction_text
 
-    # Заголовок с направлением
     if direction_text == "ПОКУПКА":
         header = f"{direction_emoji}📈 ПОКУПКА (BUY)"
     elif direction_text == "ПРОДАЖА":
@@ -107,7 +105,7 @@ def format_trade_text(trade: Trade) -> str:
 
     lines = [
         header,
-        f"<b>{trade.secid}</b> / {trade.board}",
+        f"<b>{trade.secid}</b>",
         "",
         f"💰 Сумма: <b>{fmt_money(trade.value)} ₽</b>",
         f"💵 Цена: {fmt_price(trade.price)}",
