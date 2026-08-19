@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import httpx
 from aiohttp import web
@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from dotenv import load_dotenv
 
 from config import AppConfig, TickerConfig, load_config
-from moex_client import MoexClient, Trade
+from tinkoff_client import TinkoffClient, Trade
 
 load_dotenv()
 
@@ -57,9 +57,8 @@ class BoundedSet:
             self._items.discard(old)
         return True
 
-
-def source_key(ticker: TickerConfig) -> str:
-    return f"{ticker.engine}:{ticker.market}:{ticker.board}:{ticker.ticker}"
+    def __len__(self):
+        return len(self._items)
 
 
 def fmt_money(value: Optional[float]) -> str:
@@ -105,7 +104,7 @@ def format_trade_text(trade: Trade) -> str:
 
     lines = [
         header,
-        f"<b>{trade.secid}</b>",
+        f"<b>{trade.ticker}</b>",
         "",
         f"💰 Сумма: <b>{fmt_money(trade.value)} ₽</b>",
         f"💵 Цена: {fmt_price(trade.price)}",
@@ -113,7 +112,7 @@ def format_trade_text(trade: Trade) -> str:
         f"🕐 Время: {trade.trade_time or '?'}",
         f"🆔 № сделки: {trade.trade_id or '?'}",
         "",
-        f'<a href="https://www.moex.com/ru/issue.aspx?board={trade.board}&code={trade.secid}">Открыть на MOEX</a>',
+        f'<a href="https://www.moex.com/ru/issue.aspx?code={trade.ticker}">Открыть на MOEX</a>',
     ]
     return "\n".join(lines)
 
@@ -169,34 +168,51 @@ async def self_ping() -> None:
             await asyncio.sleep(interval)
 
 
-async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
-    text = format_trade_text(trade)
-    for attempt in range(5):
-        try:
-            await bot.send_message(
-                chat_id,
-                text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            logger.info(
-                "Sent to Telegram: %s %s value=%.0f RUB, price=%s, qty=%s",
-                trade.direction_text,
-                trade.secid,
-                trade.value,
-                trade.price,
-                trade.quantity,
-            )
-            return
-        except TelegramRetryAfter as exc:
-            logger.warning("Telegram flood limit, retry after %s", exc.retry_after)
-            await asyncio.sleep(exc.retry_after)
-        except TelegramAPIError as exc:
-            logger.error("Telegram API error while sending trade: %s", exc)
-            return
-        except Exception:
-            logger.exception("Unexpected error while sending trade")
-            return
+async def send_alerts_batch(bot: Bot, chat_id: str, trades: List[Trade]) -> None:
+    """Отправляет группу трейдов одним сообщением."""
+    MAX_TRADES_PER_MSG = 10
+
+    if not trades:
+        return
+
+    trades_sorted = sorted(trades, key=lambda t: t.sort_key, reverse=True)
+
+    for i in range(0, len(trades_sorted), MAX_TRADES_PER_MSG):
+        batch = trades_sorted[i:i + MAX_TRADES_PER_MSG]
+
+        if len(batch) == 1:
+            text = format_trade_text(batch[0])
+        else:
+            parts = []
+            for trade in batch:
+                direction = trade.direction_emoji
+                parts.append(
+                    f"{direction} <b>{trade.ticker}</b> | "
+                    f"{fmt_money(trade.value)} ₽ | "
+                    f"{fmt_price(trade.price)} | "
+                    f"{fmt_qty(trade.quantity)} шт"
+                )
+            text = f"🔥 <b>{len(batch)} крупных сделок:</b>\n\n" + "\n".join(parts)
+
+        for attempt in range(5):
+            try:
+                await bot.send_message(
+                    chat_id,
+                    text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                logger.info("Sent batch to Telegram: %d trades", len(batch))
+                break
+            except TelegramRetryAfter as exc:
+                logger.warning("Telegram flood limit, retry after %s", exc.retry_after)
+                await asyncio.sleep(exc.retry_after)
+            except TelegramAPIError as exc:
+                logger.error("Telegram API error: %s", exc)
+                break
+            except Exception:
+                logger.exception("Unexpected error while sending")
+                break
 
 
 async def alert_sender(
@@ -204,114 +220,94 @@ async def alert_sender(
     bot: Bot,
     chat_id: str,
     queue: asyncio.Queue,
+    batch_interval: float = 0.3,
 ) -> None:
+    """Собирает трейды в батчи и отправляет группами."""
     while True:
-        trade: Trade = await queue.get()
+        batch: List[Trade] = []
+
         try:
-            await send_trade(bot, chat_id, trade)
-        except Exception:
-            logger.exception("Alert sender worker failed")
-        finally:
-            queue.task_done()
+            while True:
+                trade: Trade = queue.get_nowait()
+                batch.append(trade)
+                queue.task_done()
+                if len(batch) >= 50:
+                    break
+        except asyncio.QueueEmpty:
+            pass
+
+        if not batch:
+            try:
+                trade: Trade = await queue.get()
+                batch.append(trade)
+                queue.task_done()
+            except Exception:
+                continue
+
+        await asyncio.sleep(batch_interval)
+
+        try:
+            while True:
+                trade: Trade = queue.get_nowait()
+                batch.append(trade)
+                queue.task_done()
+                if len(batch) >= 50:
+                    break
+        except asyncio.QueueEmpty:
+            pass
+
+        await send_alerts_batch(bot, chat_id, batch)
 
 
-async def fetch_trades_safe(
-    moex: MoexClient,
-    ticker: TickerConfig,
+async def process_trade(
+    trade: Trade,
     cfg: AppConfig,
-):
-    try:
-        return await moex.fetch_trades(
-            secid=ticker.ticker,
-            engine=ticker.engine,
-            market=ticker.market,
-            board=ticker.board,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Failed to fetch trades for %s: %s - %s",
-            ticker.ticker,
-            type(exc).__name__,
-            str(exc) or "no message",
-        )
-        return []
-
-
-async def process_ticker(
-    cfg: AppConfig,
-    ticker: TickerConfig,
-    moex: MoexClient,
-    seen: Dict[str, BoundedSet],
-    api_semaphore: asyncio.Semaphore,
+    tickers_by_figi: Dict[str, TickerConfig],
+    seen: BoundedSet,
     alert_queue: asyncio.Queue,
-) -> None:
-    async with api_semaphore:
-        trades = await fetch_trades_safe(moex, ticker, cfg)
+) -> bool:
+    """
+    Обрабатывает одну сделку из стрима.
+    Возвращает True если сделка прошла фильтр и попала в очередь алертов.
+    """
+    # Дедупликация
+    if not seen.add(trade.dedup_key):
+        return False
 
-    if not trades:
-        return
+    # Находим порог для этого тикера
+    ticker_cfg = tickers_by_figi.get(trade.figi)
+    if ticker_cfg is None:
+        return False
 
-    threshold = ticker.min_value_rub
+    threshold = ticker_cfg.min_value_rub
     if threshold is None:
         threshold = cfg.default_min_value_rub
 
-    bucket = seen[source_key(ticker)]
+    # Фильтр по сумме
+    if trade.value < threshold:
+        return False
 
-    for trade in trades:
-        if not bucket.add(trade.dedup_key):
-            continue
+    logger.info(
+        "ALERT: %s %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
+        trade.direction_text,
+        trade.ticker,
+        trade.value,
+        trade.price,
+        trade.quantity,
+        trade.trade_id,
+    )
 
-        if trade.value >= threshold:
-            logger.info(
-                "ALERT: %s %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
-                trade.direction_text,
-                trade.secid,
-                trade.value,
-                trade.price,
-                trade.quantity,
-                trade.trade_id,
-            )
-            try:
-                alert_queue.put_nowait(trade)
-            except asyncio.QueueFull:
-                logger.warning(
-                    "Alert queue full, dropping trade %s %s",
-                    trade.secid,
-                    trade.trade_id,
-                )
+    try:
+        alert_queue.put_nowait(trade)
+    except asyncio.QueueFull:
+        logger.warning(
+            "Alert queue full, dropping trade %s %s",
+            trade.ticker,
+            trade.trade_id,
+        )
+        return False
 
-
-async def initialize_pagination(
-    cfg: AppConfig,
-    moex: MoexClient,
-    api_semaphore: asyncio.Semaphore,
-) -> None:
-    logger.info("Initializing adaptive pagination for all tickers...")
-
-    async def init_one(ticker: TickerConfig) -> None:
-        async with api_semaphore:
-            try:
-                state = await moex.find_edge(
-                    ticker.ticker,
-                    ticker.engine,
-                    ticker.market,
-                    ticker.board,
-                )
-                if state.edge_found:
-                    logger.info(
-                        "%s: edge found at start=%d, max_tradeno=%d",
-                        ticker.ticker,
-                        state.current_start,
-                        state.max_tradeno,
-                    )
-                else:
-                    logger.warning("%s: edge not found", ticker.ticker)
-            except Exception as e:
-                logger.warning("%s: pagination init failed: %s", ticker.ticker, e)
-
-    tasks = [init_one(ticker) for ticker in cfg.tickers]
-    await asyncio.gather(*tasks)
-    logger.info("Pagination initialization complete.")
+    return True
 
 
 async def main() -> None:
@@ -321,7 +317,7 @@ async def main() -> None:
     self_ping_task = asyncio.create_task(self_ping())
 
     bot = Bot(token=cfg.bot_token)
-    moex = MoexClient()
+    tinkoff = TinkoffClient(cfg.tinvest_token)
 
     workers = []
 
@@ -334,7 +330,6 @@ async def main() -> None:
             self_ping_task.cancel()
         if health_runner:
             await health_runner.cleanup()
-        await moex.close()
         await bot.session.close()
         raise
 
@@ -347,35 +342,92 @@ async def main() -> None:
                 getattr(chat, "title", "?"),
             )
         except Exception as exc:
-            logger.error(
-                "Cannot validate chat %s: %s. "
-                "Check TELEGRAM_CHAT_ID and that bot is admin in the channel.",
-                cfg.chat_id,
-                exc,
-            )
+            logger.error("Cannot validate chat %s: %s", cfg.chat_id, exc)
 
         if cfg.send_start_message:
             try:
-                await bot.send_message(
-                    cfg.chat_id,
-                    "✅ Бот мониторинга крупных сделок запущен.",
-                )
+                await bot.send_message(cfg.chat_id, "✅ Бот запущен.")
             except Exception:
-                logger.exception(
-                    "Cannot send start message. "
-                    "Check TELEGRAM_CHAT_ID and bot admin rights."
-                )
+                logger.exception("Cannot send start message.")
 
-        seen: Dict[str, BoundedSet] = {
-            source_key(ticker): BoundedSet(cfg.max_seen_per_ticker)
-            for ticker in cfg.tickers
+        # ============================================================
+        # Шаг 1: Резолвим FIGI для всех тикеров
+        # ============================================================
+        logger.info("Resolving FIGI for %d tickers...", len(cfg.tickers))
+
+        resolved_tickers: List[TickerConfig] = []
+        failed_tickers: List[str] = []
+
+        for ticker_cfg in cfg.tickers:
+            if ticker_cfg.figi:
+                # FIGI задан в конфиге — используем его
+                resolved = ticker_cfg
+            else:
+                # Резолвим через API
+                figi = await tinkoff.resolve_figi(ticker_cfg.ticker)
+                if figi:
+                    resolved = TickerConfig(
+                        ticker=ticker_cfg.ticker,
+                        min_value_rub=ticker_cfg.min_value_rub,
+                        figi=figi,
+                    )
+                else:
+                    failed_tickers.append(ticker_cfg.ticker)
+                    continue
+
+            resolved_tickers.append(resolved)
+
+        if failed_tickers:
+            logger.warning(
+                "Failed to resolve FIGI for tickers: %s",
+                ", ".join(failed_tickers),
+            )
+
+        if not resolved_tickers:
+            logger.error("No tickers could be resolved. Exiting.")
+            return
+
+        # Маппинг FIGI → TickerConfig для быстрого поиска
+        tickers_by_figi: Dict[str, TickerConfig] = {
+            t.figi: t for t in resolved_tickers
         }
 
-        api_semaphore = asyncio.Semaphore(cfg.concurrency)
-        alert_queue: asyncio.Queue = asyncio.Queue(
-            maxsize=_env_int("ALERT_QUEUE_SIZE", 5000, 100, 100000)
+        # Список FIGI для подписки
+        figis = [t.figi for t in resolved_tickers]
+
+        logger.info(
+            "Resolved %d tickers: %s",
+            len(resolved_tickers),
+            ", ".join(f"{t.ticker}({t.figi})" for t in resolved_tickers),
         )
-        sender_count = _env_int("SEND_WORKERS", 2, 1, 5)
+
+        # ============================================================
+        # Шаг 2: Инициализация состояния
+        # ============================================================
+        seen = BoundedSet(cfg.max_seen_per_ticker)
+
+        # Предзаполняем seen последними сделками, чтобы не спамить историей
+        logger.info("Pre-filling seen trades from history...")
+        for ticker_cfg in resolved_tickers:
+            last_trades = await tinkoff.get_last_trades(
+                figi=ticker_cfg.figi,
+                limit=100,
+            )
+            for trade in last_trades:
+                seen.add(trade.dedup_key)
+            logger.info(
+                "%s: pre-filled %d trades",
+                ticker_cfg.ticker,
+                len(last_trades),
+            )
+
+        # ============================================================
+        # Шаг 3: Запуск очереди алертов
+        # ============================================================
+        alert_queue: asyncio.Queue = asyncio.Queue(
+            maxsize=_env_int("ALERT_QUEUE_SIZE", 10000, 100, 100000)
+        )
+        sender_count = _env_int("SEND_WORKERS", 3, 1, 5)
 
         workers = [
             asyncio.create_task(
@@ -384,61 +436,75 @@ async def main() -> None:
                     bot,
                     cfg.chat_id,
                     alert_queue,
+                    batch_interval=0.3,
                 )
             )
             for i in range(sender_count)
         ]
 
-        await initialize_pagination(cfg, moex, api_semaphore)
+        # ============================================================
+        # Шаг 4: Запуск WebSocket-стрима
+        # ============================================================
+        logger.info("Starting trades stream...")
 
         last_heartbeat = time.time()
         HEARTBEAT_INTERVAL = 60
+        trades_received = 0
+        alerts_sent = 0
 
-        logger.info(
-            "Starting poll loop: tickers=%s, poll_seconds=%.2f",
-            len(cfg.tickers),
-            cfg.poll_seconds,
-        )
+        async def stream_listener() -> None:
+            nonlocal trades_received, alerts_sent
+
+            async for trade in tinkoff.stream_trades(figis):
+                trades_received += 1
+
+                if await process_trade(
+                    trade=trade,
+                    cfg=cfg,
+                    tickers_by_figi=tickers_by_figi,
+                    seen=seen,
+                    alert_queue=alert_queue,
+                ):
+                    alerts_sent += 1
+
+        stream_task = asyncio.create_task(stream_listener())
+
+        # ============================================================
+        # Шаг 5: Heartbeat цикл
+        # ============================================================
+        logger.info("Bot is running. Waiting for trades...")
 
         while True:
-            loop = asyncio.get_running_loop()
-            started = loop.time()
-
-            tasks = [
-                process_ticker(
-                    cfg,
-                    ticker,
-                    moex,
-                    seen,
-                    api_semaphore,
-                    alert_queue,
-                )
-                for ticker in cfg.tickers
-            ]
-
-            await asyncio.gather(*tasks)
-
-            elapsed = loop.time() - started
-            sleep_time = max(0.05, cfg.poll_seconds - elapsed)
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
 
             now = time.time()
             if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 logger.info(
-                    "Heartbeat: queue_size=%d, seen_trades=%d",
+                    "Heartbeat: trades_received=%d, alerts=%d, seen=%d, queue=%d",
+                    trades_received,
+                    alerts_sent,
+                    len(seen),
                     alert_queue.qsize(),
-                    sum(len(s._items) for s in seen.values()),
                 )
                 last_heartbeat = now
-
-            await asyncio.sleep(sleep_time)
 
     except asyncio.CancelledError:
         raise
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt")
     finally:
+        logger.info("Shutting down...")
+
         if self_ping_task:
             self_ping_task.cancel()
+
+        # Отменяем стрим
+        if 'stream_task' in locals() and stream_task:
+            stream_task.cancel()
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
 
         for worker in workers:
             worker.cancel()
@@ -452,7 +518,6 @@ async def main() -> None:
         if health_runner:
             await health_runner.cleanup()
 
-        await moex.close()
         await bot.session.close()
 
 
