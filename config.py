@@ -13,20 +13,16 @@ logger = logging.getLogger(__name__)
 class TickerConfig:
     ticker: str
     min_value_rub: Optional[float] = None
-    board: str = "TQBR"
-    market: str = "shares"
-    engine: str = "stock"
+    # FIGI будет зарезолвен автоматически при старте
+    figi: Optional[str] = None
 
 
 @dataclass
 class AppConfig:
+    tinvest_token: str
     bot_token: str
     chat_id: str
-    poll_seconds: float
-    request_limit: int
-    concurrency: int
     default_min_value_rub: float
-    send_history_on_start: bool
     send_start_message: bool
     max_seen_per_ticker: int
     tickers: List[TickerConfig]
@@ -75,10 +71,9 @@ def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
             parsed = json.loads(env_json)
             if isinstance(parsed, list):
                 return parsed
-            else:
-                logger.warning("TICKERS_JSON is not a list, falling back to file/csv")
+            logger.warning("TICKERS_JSON is not a list, falling back to file/csv")
         except json.JSONDecodeError as e:
-            logger.warning("Failed to parse TICKERS_JSON: %s. Falling back to file/csv.", e)
+            logger.warning("Failed to parse TICKERS_JSON: %s", e)
 
     if file_cfg.get("tickers"):
         return file_cfg.get("tickers") or []
@@ -95,9 +90,15 @@ def _raw_tickers(file_cfg: Dict[str, Any]) -> List[Any]:
 
 
 def load_config() -> AppConfig:
+    tinvest_token = os.getenv("TINVEST_TOKEN", "").strip()
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
+    if not tinvest_token:
+        raise RuntimeError(
+            "TINVEST_TOKEN is not set. "
+            "Get it in T-Bank app: Invest -> Settings -> API"
+        )
     if not bot_token:
         raise RuntimeError("BOT_TOKEN is not set")
     if not chat_id:
@@ -106,45 +107,25 @@ def load_config() -> AppConfig:
     config_path = os.getenv("CONFIG_PATH", "config.yaml").strip()
     file_cfg = _load_file_config(config_path)
 
-    poll_seconds = _to_float(
-        os.getenv("POLL_SECONDS", file_cfg.get("poll_seconds", 1.0)), 1.0
-    )
-    request_limit = _to_int(
-        os.getenv("REQUEST_LIMIT", file_cfg.get("request_limit", 100)), 100
-    )
-    concurrency = _to_int(
-        os.getenv("CONCURRENCY", file_cfg.get("concurrency", 5)), 5
-    )
     default_min_value_rub = _to_float(
-        os.getenv("DEFAULT_MIN_VALUE_RUB", file_cfg.get("default_min_value_rub", 1_000_000)),
-        1_000_000,
-    )
-    send_history_on_start = _to_bool(
-        os.getenv("SEND_HISTORY_ON_START", file_cfg.get("send_history_on_start", False)),
-        False,
+        os.getenv("DEFAULT_MIN_VALUE_RUB", file_cfg.get("default_min_value_rub", 2_000_000)),
+        2_000_000,
     )
     send_start_message = _to_bool(
         os.getenv("SEND_START_MESSAGE", file_cfg.get("send_start_message", False)),
         False,
     )
     max_seen_per_ticker = _to_int(
-        os.getenv("MAX_SEEN_PER_TICKER", file_cfg.get("max_seen_per_ticker", 10000)),
-        10000,
+        os.getenv("MAX_SEEN_PER_TICKER", file_cfg.get("max_seen_per_ticker", 50000)),
+        50000,
     )
 
-    poll_seconds = max(0.2, poll_seconds or 1.0)
-    request_limit = min(max(10, request_limit or 100), 5000)
-    concurrency = min(max(1, concurrency or 1), 20)
     default_min_value_rub = max(0.0, default_min_value_rub or 0.0)
-    max_seen_per_ticker = max(100, max_seen_per_ticker or 10000)
+    max_seen_per_ticker = max(100, max_seen_per_ticker or 50000)
 
     raw_tickers = _raw_tickers(file_cfg)
     if not isinstance(raw_tickers, list):
         raise RuntimeError("Tickers config must be a list")
-
-    default_board = str(file_cfg.get("board", "TQBR")).strip() or "TQBR"
-    default_market = str(file_cfg.get("market", "shares")).strip() or "shares"
-    default_engine = str(file_cfg.get("engine", "stock")).strip() or "stock"
 
     tickers: List[TickerConfig] = []
     for item in raw_tickers:
@@ -165,30 +146,25 @@ def load_config() -> AppConfig:
             TickerConfig(
                 ticker=ticker,
                 min_value_rub=min_value,
-                board=str(item.get("board", default_board)).strip() or default_board,
-                market=str(item.get("market", default_market)).strip() or default_market,
-                engine=str(item.get("engine", default_engine)).strip() or default_engine,
+                figi=str(item.get("figi", "")).strip() or None,
             )
         )
 
-    unique_tickers: Dict[str, TickerConfig] = {}
+    # Убираем дубли
+    unique: Dict[str, TickerConfig] = {}
     for ticker in tickers:
-        key = f"{ticker.engine}:{ticker.market}:{ticker.board}:{ticker.ticker}"
-        if key not in unique_tickers:
-            unique_tickers[key] = ticker
-    tickers = list(unique_tickers.values())
+        if ticker.ticker not in unique:
+            unique[ticker.ticker] = ticker
+    tickers = list(unique.values())
 
     if not tickers:
         raise RuntimeError("No tickers configured.")
 
     return AppConfig(
+        tinvest_token=tinvest_token,
         bot_token=bot_token,
         chat_id=chat_id,
-        poll_seconds=poll_seconds,
-        request_limit=request_limit,
-        concurrency=concurrency,
         default_min_value_rub=default_min_value_rub,
-        send_history_on_start=send_history_on_start,
         send_start_message=send_start_message,
         max_seen_per_ticker=max_seen_per_ticker,
         tickers=tickers,
