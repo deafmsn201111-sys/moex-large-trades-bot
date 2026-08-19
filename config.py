@@ -35,23 +35,14 @@ class AppConfig:
 def _to_bool(value: Any, default: bool = False) -> bool:
     if value is None:
         return default
-
     if isinstance(value, bool):
         return value
-
-    return str(value).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-        "y",
-    }
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
 def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     if value is None:
         return default
-
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -61,7 +52,6 @@ def _to_float(value: Any, default: Optional[float] = None) -> Optional[float]:
 def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     if value is None:
         return default
-
     try:
         return int(float(value))
     except (TypeError, ValueError):
@@ -71,13 +61,10 @@ def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 def _load_file_config(path: str) -> Dict[str, Any]:
     if not path or not os.path.isfile(path):
         return {}
-
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-
     if not isinstance(data, dict):
         return {}
-
     return data
 
 
@@ -113,7 +100,6 @@ def load_config() -> AppConfig:
 
     if not bot_token:
         raise RuntimeError("BOT_TOKEN is not set")
-
     if not chat_id:
         raise RuntimeError("TELEGRAM_CHAT_ID is not set")
 
@@ -121,60 +107,38 @@ def load_config() -> AppConfig:
     file_cfg = _load_file_config(config_path)
 
     poll_seconds = _to_float(
-        os.getenv("POLL_SECONDS", file_cfg.get("poll_seconds", 1.0)),
-        1.0,
+        os.getenv("POLL_SECONDS", file_cfg.get("poll_seconds", 1.0)), 1.0
     )
-
     request_limit = _to_int(
-        os.getenv("REQUEST_LIMIT", file_cfg.get("request_limit", 100)),
-        100,
+        os.getenv("REQUEST_LIMIT", file_cfg.get("request_limit", 100)), 100
     )
-
     concurrency = _to_int(
-        os.getenv("CONCURRENCY", file_cfg.get("concurrency", 5)),
-        5,
+        os.getenv("CONCURRENCY", file_cfg.get("concurrency", 5)), 5
     )
-
     default_min_value_rub = _to_float(
-        os.getenv(
-            "DEFAULT_MIN_VALUE_RUB",
-            file_cfg.get("default_min_value_rub", 1_000_000),
-        ),
+        os.getenv("DEFAULT_MIN_VALUE_RUB", file_cfg.get("default_min_value_rub", 1_000_000)),
         1_000_000,
     )
-
     send_history_on_start = _to_bool(
-        os.getenv(
-            "SEND_HISTORY_ON_START",
-            file_cfg.get("send_history_on_start", False),
-        ),
+        os.getenv("SEND_HISTORY_ON_START", file_cfg.get("send_history_on_start", False)),
         False,
     )
-
     send_start_message = _to_bool(
-        os.getenv(
-            "SEND_START_MESSAGE",
-            file_cfg.get("send_start_message", False),
-        ),
+        os.getenv("SEND_START_MESSAGE", file_cfg.get("send_start_message", False)),
         False,
     )
-
     max_seen_per_ticker = _to_int(
-        os.getenv(
-            "MAX_SEEN_PER_TICKER",
-            file_cfg.get("max_seen_per_ticker", 10000),
-        ),
+        os.getenv("MAX_SEEN_PER_TICKER", file_cfg.get("max_seen_per_ticker", 10000)),
         10000,
     )
 
     poll_seconds = max(0.2, poll_seconds or 1.0)
-    request_limit = min(max(10, request_limit or 100), 500)
+    request_limit = min(max(10, request_limit or 100), 5000)
     concurrency = min(max(1, concurrency or 1), 20)
     default_min_value_rub = max(0.0, default_min_value_rub or 0.0)
     max_seen_per_ticker = max(100, max_seen_per_ticker or 10000)
 
     raw_tickers = _raw_tickers(file_cfg)
-
     if not isinstance(raw_tickers, list):
         raise RuntimeError("Tickers config must be a list")
 
@@ -183,11 +147,9 @@ def load_config() -> AppConfig:
     default_engine = str(file_cfg.get("engine", "stock")).strip() or "stock"
 
     tickers: List[TickerConfig] = []
-
     for item in raw_tickers:
         if isinstance(item, str):
             item = {"ticker": item}
-
         if not isinstance(item, dict):
             continue
 
@@ -195,11 +157,7 @@ def load_config() -> AppConfig:
         if not ticker:
             continue
 
-        min_value = _to_float(
-            item.get("min_value_rub", item.get("min_value")),
-            None,
-        )
-
+        min_value = _to_float(item.get("min_value_rub", item.get("min_value")), None)
         if min_value is not None and min_value < 0:
             min_value = None
 
@@ -218,13 +176,10 @@ def load_config() -> AppConfig:
         key = f"{ticker.engine}:{ticker.market}:{ticker.board}:{ticker.ticker}"
         if key not in unique_tickers:
             unique_tickers[key] = ticker
-
     tickers = list(unique_tickers.values())
 
     if not tickers:
-        raise RuntimeError(
-            "No tickers configured. Set tickers in config.yaml or env TICKERS/TICKERS_JSON."
-        )
+        raise RuntimeError("No tickers configured.")
 
     return AppConfig(
         bot_token=bot_token,
