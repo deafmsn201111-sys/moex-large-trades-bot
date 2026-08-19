@@ -4,11 +4,13 @@ PyYAML>=6.0.1,<7
 python-dotenv>=1.0.1,<2
 aiohttp>=3.9.5,<4
 
-# T-Bank Invest SDK (устанавливаем с GitHub, ветка main)
-tinkoff-investments @ git+https://github.com/RussianInvestments/invest-python.git
-
-# Зависимости tinkoff-invest
+# Зависимости для tinkoff-invest (ставим явно)
 grpcio>=1.64.0
 grpcio-tools>=1.64.0
 protobuf>=4.25.0,<6
 cachetools>=5.0.0
+deprecation>=2.1.0
+python-dateutil>=2.8.2
+
+# tinkoff-invest SDK БЕЗ зависимостей (ставим через --no-deps)
+# Установим в Dockerfile отдельно
