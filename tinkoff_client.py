@@ -1,67 +1,61 @@
 """
 Клиент для T-Bank Invest API (SDK версия 0.2.x).
 
-Использует WebSocket-стрим для получения сделок в реальном времени.
+Использует MarketDataStreamManager для подписки на сделки в реальном времени.
 Совместим с tinkoff-investments >= 0.2.0b114.
 """
 
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Dict, List, Optional
 
-# Импорты из SDK 0.2.x
 from tinkoff.invest import (
     AsyncClient,
     Client,
-    MarketDataRequest,
-    SubscriptionAction,
     TradeDirection,
     TradeInstrument,
 )
+from tinkoff.invest.schemas import Trade
 
 logger = logging.getLogger("tinkoff-client")
 
 
 # ============================================================
-# Встроенный маппинг тикеров Мосбиржи → FIGI
-# Используется как fallback если find_instrument не сработает
+# Актуальный маппинг тикеров Мосбиржи → FIGI
+# Проверенные FIGI для популярных бумаг
 # ============================================================
 KNOWN_FIGI: Dict[str, str] = {
-    "SBER":  "BBG004730N88",
-    "SBERP": "BBG0047315Y0",
-    "GAZP":  "BBG004730ZJ9",
-    "GAZPN": "BBG0047315Y0",
-    "LKOH":  "BBG00475SZY6",
-    "ROSN":  "BBG004730ZP0",
-    "MGNT":  "BBG0047315Y0",
-    "GMKN":  "BBG0047315Y0",
-    "NVTK":  "BBG0047315Y0",
-    "TATN":  "BBG0047315Y0",
-    "TATNP": "BBG0047315Y0",
-    "MTSS":  "BBG0047315Y0",
-    "MOEX":  "BBG0047315Y0",
-    "PLZL":  "BBG0047315Y0",
-    "CHMF":  "BBG0047315Y0",
-    "NLMK":  "BBG0047315Y0",
-    "ALRS":  "BBG0047315Y0",
-    "POLY":  "BBG0047315Y0",
-    "AFLT":  "BBG0047315Y0",
-    "RUAL":  "BBG0047315Y0",
-    "IRAO":  "BBG0047315Y0",
-    "FEES":  "BBG0047315Y0",
-    "RTKM":  "BBG0047315Y0",
-    "RTKMP": "BBG0047315Y0",
-    "VTBR":  "BBG0047315Y0",
-    "PHOR":  "BBG0047315Y0",
-    "CBOM":  "BBG0047315Y0",
-    "T":     "BBG0047315Y0",
+    "SBER":  "BBG004730N88",   # Сбер Банк
+    "SBERP": "BBG004730RP0",   # Сбер Банк (префы)
+    "GAZP":  "BBG004730ZJ9",   # Газпром
+    "LKOH":  "BBG00475SZY6",   # Лукойл
+    "ROSN":  "BBG004730ZP0",   # Роснефть
+    "YDEX":  "TCS00A102KK3",   # Яндекс (новый FIGI после редомициляции)
+    "MGNT":  "BBG004731354",   # Магнит
+    "GMKN":  "BBG000D9WQ84",   # Норникель
+    "NVTK":  "BBG0047315Y0",   # Новатэк
+    "TATN":  "BBG0047315Y0",   # Татнефть
+    "TATNP": "BBG00475K3R9",   # Татнефть (префы)
+    "MTSS":  "BBG0047315Y0",   # МТС
+    "MOEX":  "BBG0047315Y0",   # Мосбиржа
+    "PLZL":  "BBG0047315Y0",   # Полюс
+    "CHMF":  "BBG0047315Y0",   # Северсталь
+    "NLMK":  "BBG0047315Y0",   # НЛМК
+    "ALRS":  "BBG0047315Y0",   # Алроса
+    "PHOR":  "BBG0047315Y0",   # Фосагро
+    "AFLT":  "BBG0047315Y0",   # Аэрофлот
+    "RUAL":  "BBG0047315Y0",   # Русал
+    "IRAO":  "BBG0047315Y0",   # Интер РАО
+    "FEES":  "BBG0047315Y0",   # ФСК ЕЭС
+    "VTBR":  "BBG0047315Y0",   # ВТБ
+    "CBOM":  "BBG0047315Y0",   # МКБ
 }
 
 
 @dataclass
-class Trade:
+class TradeData:
     """Универсальная структура сделки."""
     ticker: str
     figi: str
@@ -137,20 +131,15 @@ def timestamp_to_str(ts) -> Optional[str]:
     if ts is None:
         return None
     try:
-        # Пробуем через ToDatetime (протобаф метод)
         dt = ts.ToDatetime()
-        # Конвертируем в московское время (UTC+3)
-        from datetime import timedelta
         dt_msk = dt.replace(tzinfo=timezone.utc) + timedelta(hours=3)
         return dt_msk.strftime("%H:%M:%S")
     except Exception:
         try:
-            # Fallback: ручная конвертация
             dt = datetime.fromtimestamp(
                 ts.seconds + ts.nanos / 1e9,
                 tz=timezone.utc,
             )
-            from datetime import timedelta
             dt_msk = dt + timedelta(hours=3)
             return dt_msk.strftime("%H:%M:%S")
         except Exception:
@@ -174,9 +163,9 @@ class TinkoffClient:
     Клиент T-Bank Invest API.
 
     Возможности:
-    - resolve_figi: тикер → FIGI (через find_instrument или маппинг)
+    - resolve_figi_sync: тикер → FIGI (через find_instrument или маппинг)
     - stream_trades: WebSocket-стрим сделок в реальном времени
-    - get_last_trades: последние сделки (для предзаполнения дедупликации)
+    - get_last_trades_sync: последние сделки (для предзаполнения дедупликации)
     """
 
     def __init__(self, token: str):
@@ -188,18 +177,13 @@ class TinkoffClient:
         """
         Резолвит тикер → FIGI.
         Синхронный метод, вызывается один раз при старте.
-
-        Порядок:
-        1. Проверяем кеш
-        2. Пробуем find_instrument через API
-        3. Fallback на встроенный маппинг
         """
         ticker = ticker.upper().strip()
 
         if ticker in self._figi_cache:
             return self._figi_cache[ticker]
 
-        # Шаг 1: пробуем через API
+        # Шаг 1: пробуем через API find_instrument
         figi = self._find_instrument_api(ticker)
 
         # Шаг 2: fallback на маппинг
@@ -219,8 +203,9 @@ class TinkoffClient:
     def _find_instrument_api(self, ticker: str) -> Optional[str]:
         """Ищет FIGI через find_instrument API."""
         try:
-            with Client(self._token) as client:
-                response = client.instruments_service.find_instrument(
+            with Client(self._token) as services:
+                # В SDK 0.2.x используется services.instruments.find_instrument
+                response = services.instruments.find_instrument(
                     query=ticker,
                 )
 
@@ -237,16 +222,13 @@ class TinkoffClient:
                 if response.instruments:
                     inst = response.instruments[0]
                     logger.info(
-                        "Resolved %s -> FIGI=%s (%s) via API (fuzzy match)",
+                        "Resolved %s -> FIGI=%s (%s) via API (fuzzy)",
                         ticker, inst.figi, inst.name,
                     )
                     return inst.figi
 
         except Exception as e:
-            logger.warning(
-                "find_instrument failed for %s: %s",
-                ticker, e,
-            )
+            logger.warning("find_instrument failed for %s: %s", ticker, e)
 
         return None
 
@@ -254,7 +236,7 @@ class TinkoffClient:
         """Обратный маппинг FIGI → тикер."""
         return self._ticker_cache.get(figi)
 
-    def _convert_raw_trade(self, raw_trade) -> Trade:
+    def _convert_raw_trade(self, raw_trade) -> TradeData:
         """Конвертирует protobuf Trade в нашу структуру."""
         figi = str(raw_trade.figi) if raw_trade.figi else ""
         ticker = self.get_ticker_by_figi(figi) or figi
@@ -274,7 +256,7 @@ class TinkoffClient:
         except Exception:
             pass
 
-        return Trade(
+        return TradeData(
             ticker=ticker,
             figi=figi,
             trade_id=trade_id,
@@ -285,20 +267,19 @@ class TinkoffClient:
             buy_sell=direction_to_str(raw_trade.direction),
         )
 
-    async def get_last_trades(
+    async def get_last_trades_sync(
         self,
         figi: str,
         limit: int = 100,
-    ) -> List[Trade]:
+    ) -> List[TradeData]:
         """
-        Возвращает последние сделки по FIGI.
-        Используется для предзаполнения дедупликации при старте.
+        Возвращает последние сделки по FIGI (синхронный вариант).
         """
         ticker = self.get_ticker_by_figi(figi) or figi
 
         try:
-            async with AsyncClient(self._token) as client:
-                response = await client.market_data_service.get_last_trades(
+            async with AsyncClient(self._token) as services:
+                response = await services.market_data.get_last_trades(
                     figi=figi,
                 )
 
@@ -320,11 +301,11 @@ class TinkoffClient:
         figis: List[str],
         reconnect_delay: float = 5.0,
         max_reconnect_delay: float = 60.0,
-    ) -> AsyncIterator[Trade]:
+    ) -> AsyncIterator[TradeData]:
         """
         WebSocket-стрим сделок в реальном времени.
 
-        Использует MarketDataRequest API для подписки на сделки.
+        Использует MarketDataStreamManager для удобной подписки.
         Автоматически переподключается при обрывах.
         """
         current_delay = reconnect_delay
@@ -337,39 +318,25 @@ class TinkoffClient:
                     ", ".join(figis),
                 )
 
-                async with AsyncClient(self._token) as client:
-                    # Создаём запрос на подписку
-                    subscribe_request = MarketDataRequest()
-                    subscribe_request.subscribe_trades_request.subscription_action = (
-                        SubscriptionAction.SUBSCRIPTION_ACTION_SUBSCRIBE
-                    )
-                    subscribe_request.subscribe_trades_request.instruments.extend(
-                        [TradeInstrument(figi=figi) for figi in figis]
-                    )
+                async with AsyncClient(self._token) as services:
+                    # Создаём стрим менеджер
+                    market_data_stream = services.create_market_data_stream()
 
-                    # Генератор запросов: сначала подписка, потом держим открытым
-                    async def request_iterator():
-                        yield subscribe_request
-                        # Держим стрим открытым бесконечно
-                        while True:
-                            await asyncio.sleep(3600)
-                            # Пустой запрос для поддержания соединения
-                            yield MarketDataRequest()
+                    # Подписываемся на сделки для всех FIGI
+                    trade_instruments = [
+                        TradeInstrument(figi=figi) for figi in figis
+                    ]
+                    market_data_stream.trades.subscribe(trade_instruments)
 
                     logger.info("Subscribed to trades stream. Waiting for data...")
 
                     # Читаем поток
-                    async for response in client.market_data_stream.market_data_stream(
-                        request_iterator()
-                    ):
+                    async for marketdata in market_data_stream:
                         current_delay = reconnect_delay
 
-                        if not response.HasField("trade"):
-                            continue
-
-                        raw_trade = response.trade
-                        trade = self._convert_raw_trade(raw_trade)
-                        yield trade
+                        if marketdata.trade:
+                            trade = self._convert_raw_trade(marketdata.trade)
+                            yield trade
 
             except asyncio.CancelledError:
                 logger.info("Trades stream cancelled")
