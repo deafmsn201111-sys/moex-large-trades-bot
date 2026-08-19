@@ -16,9 +16,6 @@ from moex_client import MoexClient, Trade
 
 load_dotenv()
 
-# ============================================================
-# НАСТРОЙКА ЛОГОВ
-# ============================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -33,7 +30,6 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 logger = logging.getLogger("moex-bot")
 logger.setLevel(logging.INFO)
-# ============================================================
 
 
 def _env_int(name: str, default: int, min_value: int, max_value: int) -> int:
@@ -166,7 +162,7 @@ async def send_trade(bot: Bot, chat_id: str, trade: Trade) -> None:
         try:
             await bot.send_message(chat_id, text)
             logger.info(
-                "✅ Sent to Telegram: %s value=%.0f RUB, price=%s, qty=%s",
+                "Sent to Telegram: %s value=%.0f RUB, price=%s, qty=%s",
                 trade.secid,
                 trade.value,
                 trade.price,
@@ -211,10 +207,8 @@ async def fetch_trades_safe(
             engine=ticker.engine,
             market=ticker.market,
             board=ticker.board,
-            limit=cfg.request_limit,
         )
     except Exception as exc:
-        # Теперь будет видно тип ошибки (например, ReadTimeout или ConnectError)
         logger.warning(
             "Failed to fetch trades for %s: %s - %s",
             ticker.ticker,
@@ -250,7 +244,7 @@ async def process_ticker(
 
         if trade.value >= threshold:
             logger.info(
-                "🔥 ALERT: %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
+                "ALERT: %s trade value=%.0f RUB, price=%s, qty=%s, id=%s",
                 trade.secid,
                 trade.value,
                 trade.price,
@@ -267,21 +261,37 @@ async def process_ticker(
                 )
 
 
-async def mark_initial_trades(
+async def initialize_pagination(
     cfg: AppConfig,
     moex: MoexClient,
-    seen: Dict[str, BoundedSet],
     api_semaphore: asyncio.Semaphore,
 ) -> None:
-    async def mark_one(ticker: TickerConfig) -> None:
-        async with api_semaphore:
-            trades = await fetch_trades_safe(moex, ticker, cfg)
-        bucket = seen[source_key(ticker)]
-        for trade in trades:
-            bucket.add(trade.dedup_key)
+    logger.info("Initializing adaptive pagination for all tickers...")
 
-    tasks = [mark_one(ticker) for ticker in cfg.tickers]
+    async def init_one(ticker: TickerConfig) -> None:
+        async with api_semaphore:
+            try:
+                state = await moex.find_edge(
+                    ticker.ticker,
+                    ticker.engine,
+                    ticker.market,
+                    ticker.board,
+                )
+                if state.edge_found:
+                    logger.info(
+                        "%s: edge found at start=%d, max_tradeno=%d",
+                        ticker.ticker,
+                        state.current_start,
+                        state.max_tradeno,
+                    )
+                else:
+                    logger.warning("%s: edge not found", ticker.ticker)
+            except Exception as e:
+                logger.warning("%s: pagination init failed: %s", ticker.ticker, e)
+
+    tasks = [init_one(ticker) for ticker in cfg.tickers]
     await asyncio.gather(*tasks)
+    logger.info("Pagination initialization complete.")
 
 
 async def main() -> None:
@@ -319,8 +329,7 @@ async def main() -> None:
         except Exception as exc:
             logger.error(
                 "Cannot validate chat %s: %s. "
-                "Check TELEGRAM_CHAT_ID (должен начинаться с -100 для каналов!) "
-                "и что бот добавлен админом в канал с правом постить.",
+                "Check TELEGRAM_CHAT_ID and that bot is admin in the channel.",
                 cfg.chat_id,
                 exc,
             )
@@ -360,17 +369,16 @@ async def main() -> None:
             for i in range(sender_count)
         ]
 
-        if not cfg.send_history_on_start:
-            await mark_initial_trades(cfg, moex, seen, api_semaphore)
+        # Инициализируем адаптивную пагинацию
+        await initialize_pagination(cfg, moex, api_semaphore)
 
         last_heartbeat = time.time()
         HEARTBEAT_INTERVAL = 60
 
         logger.info(
-            "Starting poll loop: tickers=%s, poll_seconds=%.2f, request_limit=%s",
+            "Starting poll loop: tickers=%s, poll_seconds=%.2f",
             len(cfg.tickers),
             cfg.poll_seconds,
-            cfg.request_limit,
         )
 
         while True:
