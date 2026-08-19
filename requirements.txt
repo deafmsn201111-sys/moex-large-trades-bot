@@ -4,8 +4,8 @@ PyYAML>=6.0.1,<7
 python-dotenv>=1.0.1,<2
 aiohttp>=3.9.5,<4
 
-# T-Bank Invest SDK (пакет удалён с PyPI, ставим с GitHub)
-tinkoff-invest @ git+https://github.com/RussianInvestments/invest-python.git@master
+# T-Bank Invest SDK (устанавливаем с GitHub, ветка main)
+tinkoff-investments @ git+https://github.com/RussianInvestments/invest-python.git
 
 # Зависимости tinkoff-invest
 grpcio>=1.64.0
