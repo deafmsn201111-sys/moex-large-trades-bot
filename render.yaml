@@ -6,31 +6,35 @@ services:
     healthCheckPath: /health
     dockerfilePath: ./Dockerfile
     envVars:
+      - key: TINVEST_TOKEN
+        sync: false
+
       - key: BOT_TOKEN
         sync: false
+
       - key: TELEGRAM_CHAT_ID
         sync: false
+
       - key: TICKERS_JSON
         sync: false
-      - key: POLL_SECONDS
-        value: "1.0"
-      - key: REQUEST_LIMIT
-        value: "5000"
-      - key: CONCURRENCY
-        value: "5"
+
       - key: DEFAULT_MIN_VALUE_RUB
         value: "2000000"
-      - key: SEND_HISTORY_ON_START
-        value: "false"
+
       - key: SEND_START_MESSAGE
         value: "false"
+
       - key: ALERT_QUEUE_SIZE
-        value: "5000"
+        value: "10000"
+
       - key: SEND_WORKERS
-        value: "2"
+        value: "3"
+
       - key: CONFIG_PATH
         value: "config.yaml"
+
       - key: SELF_PING_URL
         sync: false
+
       - key: SELF_PING_INTERVAL_SECONDS
         value: "300"
