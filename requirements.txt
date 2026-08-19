@@ -3,4 +3,12 @@ httpx>=0.27.0,<1
 PyYAML>=6.0.1,<7
 python-dotenv>=1.0.1,<2
 aiohttp>=3.9.5,<4
-tinkoff-invest>=0.11.9
+
+# T-Bank Invest SDK (пакет удалён с PyPI, ставим с GitHub)
+tinkoff-invest @ git+https://github.com/RussianInvestments/invest-python.git@master
+
+# Зависимости tinkoff-invest
+grpcio>=1.64.0
+grpcio-tools>=1.64.0
+protobuf>=4.25.0,<6
+cachetools>=5.0.0
